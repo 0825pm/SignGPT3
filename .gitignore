@@ -20,3 +20,4 @@ test_folder.py
 ig-*.py
 checkpoints/
 *.ckpt
+*.mp4
