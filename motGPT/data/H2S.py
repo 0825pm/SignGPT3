@@ -40,27 +40,33 @@ def feats2joints_smplx(features, mean, std):
     Convert 133-dim SOKE features to 3D joints using SMPL-X.
     
     Args:
-        features: [B, T, 133] normalized features
+        features: [B, T, 133] or [T, 133] normalized features
         mean: [133] mean for denormalization
         std: [133] std for denormalization
     
     Returns:
-        vertices: [B, T, 10475, 3] SMPL-X vertices
+        vertices: [B, T, 10475, 3] SMPL-X vertices (or None)
         joints: [B, T, 127, 3] SMPL-X joints
     """
+    # Handle 2D input (T, D) -> (1, T, D)
+    squeeze_output = False
+    if len(features.shape) == 2:
+        features = features.unsqueeze(0)
+        squeeze_output = True
+    
+    B, T, D = features.shape
+    
     if not HAS_SMPLX:
         # Fallback to zeros
-        if len(features.shape) == 2:
-            features = features.unsqueeze(0)
-        B, T, D = features.shape
-        return None, torch.zeros(B, T, 55, 3, device=features.device)
+        joints = torch.zeros(B, T, 55, 3, device=features.device)
+        if squeeze_output:
+            joints = joints.squeeze(0)
+        return None, joints
     
     # Denormalize
     mean = mean.to(features.device)
     std = std.to(features.device)
     features = features * std + mean
-    
-    B, T, D = features.shape
     
     # Add zero lower body pose (36 dims: 3 root + 11 lower body joints * 3)
     zero_pose = torch.zeros(B, T, 36, device=features.device, dtype=features.dtype)
@@ -72,30 +78,34 @@ def feats2joints_smplx(features, mean, std):
     shape_param = shape_param.unsqueeze(0).repeat(B, T, 1).view(B*T, -1)
     
     # Concatenate: [zero_pose(36), features(133)] = 169 dims
-    # Features layout: body(30) + lhand(45) + rhand(45) + jaw(3) + expr(10) = 133
     features_full = torch.cat([zero_pose, features], dim=-1).view(B*T, -1)
     
-    # SMPL-X input layout (169 dims):
-    # root_pose: 0:3
-    # body_pose: 3:66 (21 joints * 3)
-    # lhand_pose: 66:111 (15 joints * 3)
-    # rhand_pose: 111:156 (15 joints * 3)
-    # jaw_pose: 156:159
-    # expr: 159:169
+    try:
+        vertices, joints = get_coord(
+            root_pose=features_full[..., 0:3],
+            body_pose=features_full[..., 3:66],
+            lhand_pose=features_full[..., 66:111],
+            rhand_pose=features_full[..., 111:156],
+            jaw_pose=features_full[..., 156:159],
+            shape=shape_param,
+            expr=features_full[..., 159:169]
+        )
+        
+        # Reshape back to [B, T, ...]
+        if vertices is not None:
+            vertices = vertices.view(B, T, -1, 3)
+        joints = joints.view(B, T, -1, 3)
+        
+    except Exception as e:
+        print(f"Warning: SMPL-X forward failed: {e}")
+        vertices = None
+        joints = torch.zeros(B, T, 55, 3, device=features.device, dtype=features.dtype)
     
-    vertices, joints = get_coord(
-        root_pose=features_full[..., 0:3],
-        body_pose=features_full[..., 3:66],
-        lhand_pose=features_full[..., 66:111],
-        rhand_pose=features_full[..., 111:156],
-        jaw_pose=features_full[..., 156:159],
-        shape=shape_param,
-        expr=features_full[..., 159:169]
-    )
-    
-    # Reshape back to [B, T, ...]
-    vertices = vertices.view(B, T, -1, 3)
-    joints = joints.view(B, T, -1, 3)
+    # Squeeze if input was 2D
+    if squeeze_output:
+        if vertices is not None:
+            vertices = vertices.squeeze(0)
+        joints = joints.squeeze(0)
     
     return vertices, joints
 
@@ -157,11 +167,22 @@ class H2SDataModule(LightningDataModule):
         self.hparams.std = self.std
         
         # Set feats2joints with SMPL-X support
+        # Wrapper to handle tuple return (vertices, joints) -> joints only for motgpt_2optimizer
+        _mean = self.mean
+        _std = self.std
+        _njoints = self.njoints
+        
+        def _feats2joints_wrapper(x):
+            result = feats2joints_smplx(x, _mean, _std)
+            if isinstance(result, tuple):
+                return result[1]  # joints만 반환
+            return result
+        
         if HAS_SMPLX:
-            self.feats2joints = lambda x: feats2joints_smplx(x, self.mean, self.std)
+            self.feats2joints = _feats2joints_wrapper
             print(f"  feats2joints: SMPL-X enabled")
         else:
-            self.feats2joints = lambda x: feats2joints_sign(x, self.njoints)
+            self.feats2joints = lambda x: feats2joints_sign(x, _njoints)
             print(f"  feats2joints: Placeholder (zeros)")
         
         # Dataset tracking

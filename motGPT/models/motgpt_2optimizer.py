@@ -94,20 +94,6 @@ class MotGPT(BaseModel):
 
         self.automatic_optimization = False
 
-    # def training_step(self, batch, batch_idx):
-    #     opt1, opt2 = self.optimizers()
-    #     loss = self.allsplit_step("train", batch, batch_idx)
-    #     if (self.current_epoch+1) % self.accumulate_grad_batches == 0:
-    #         self.manual_backward(loss)
-    #         opt1.step()
-    #         opt2.step()
-    #         opt1.zero_grad()
-    #         opt2.zero_grad()
-    #         self.total_loss = loss
-    #     else:
-    #         self.total_loss += loss
-    #     return loss
-
     def training_step(self, batch, batch_idx):
         opt1, opt2 = self.optimizers()
         loss = self.allsplit_step("train", batch, batch_idx)
@@ -117,30 +103,6 @@ class MotGPT(BaseModel):
         opt1.step()
         opt2.step()
         return loss
-    
-    # {def training_step(self, batch, batch_idx):
-    #     opt1, opt2 = self.optimizers()
-    #     loss = self.allsplit_step("train", batch, batch_idx)
-    #     self.manual_backward(loss)
-    #     if (self.ep +1) % self.accumulation_steps == 0:
-    #         opt1.step()
-    #         opt2.step()
-    #         opt1.zero_grad()
-    #         opt2.zero_grad()
-    #     self.ep += 1
-    #     return loss
-
-    # def on_train_batch_start(self, batch, batch_idx):
-    #     opt1, opt2 = self.optimizers()
-    #     opt1.zero_grad()
-    #     opt2.zero_grad()
-    #     return super().on_train_batch_start(batch, batch_idx)
-    
-    # def on_train_epoch_end(self):
-    #     opt1, opt2 = self.optimizers()
-    #     opt1.step()
-    #     opt2.step()
-    #     return super().on_train_epoch_end()}
 
     def configure_optimizers(self):
         from motGPT.config import get_obj_from_str
@@ -181,7 +143,6 @@ class MotGPT(BaseModel):
 
         
     def forward(self, batch, task="t2m"):
-        # assert False, "not done yet"
         texts = batch["text"]
         lengths_ref = batch["length"]
         if task in ['inbetween']:
@@ -200,15 +161,13 @@ class MotGPT(BaseModel):
             sampled_token_latents, motion_mask = self.lm.sample_tokens(
                 outputs, self.lm.device, 
                 temperature=1.0, cfg=self.guidance_scale, 
-            vae_mean_std_inv=self.vae.mean_std_inv) # , cfg_schedule="linear"
-            sampled_token_latents = sampled_token_latents.reshape(len(lengths), self.vae.latent_size, -1).permute(1,0,2)  # [1,bs,256]
+            vae_mean_std_inv=self.vae.mean_std_inv)
+            sampled_token_latents = sampled_token_latents.reshape(len(lengths), self.vae.latent_size, -1).permute(1,0,2)
             feats_rst = self.vae.decode(sampled_token_latents, lengths=lengths)
 
-            # Recover joints for evaluation
             joints_rst = self.feats2joints(feats_rst)
             feats_rst = self.datamodule.denormalize(feats_rst)
             gen_texts = ['<Motion_Placeholder>' for t in texts]
-            # return set
             outputs = {
                 "texts": gen_texts,
                 "feats": feats_rst,
@@ -226,7 +185,6 @@ class MotGPT(BaseModel):
                 bad_words_ids=[[self.lm.som_id], [self.lm.eom_id]]
             )
             gen_texts = cleaned_text
-            # return set
             outputs = {
                 "texts": gen_texts,
                 "feats": None,
@@ -238,31 +196,39 @@ class MotGPT(BaseModel):
             
         return outputs
 
+    # def train_lm_forward(self, batch):
+    #     feats_ref = batch["motion"]
+    #     texts = batch["text"]
+    #     lengths = batch["length"]
+    #     tasks = batch["tasks"]
+
+    #     outputs = self.lm(texts, feats_ref, self.vae, lengths, tasks)
+    #     return {'outputs': outputs}
     def train_lm_forward(self, batch):
         feats_ref = batch["motion"]
         texts = batch["text"]
         lengths = batch["length"]
         tasks = batch["tasks"]
-        # all_captions = batch['all_captions']
-        # if self.hparams.condition == 'caption':
-        #     texts = [random.choice(all_captions[i]) for i in range(len(texts))]
 
-        # LLM Forward
         outputs = self.lm(texts, feats_ref, self.vae, lengths, tasks)
-        # coef = sig(self.current_epoch/10.)*2-1
-        # outputs.loss  = outputs.loss *coef
-        return {'outputs': outputs,
-                # 'xstart': xstart,
-                # 'hidden': hidden,
-                }
+        
+        # ===== 디버깅 추가 =====
+        print(f"[DEBUG] outputs type: {type(outputs)}")
+        if hasattr(outputs, 'loss'):
+            print(f"[DEBUG] outputs.loss: {outputs.loss}")
+        else:
+            print("[DEBUG] outputs has NO 'loss' attribute!")
+        if hasattr(outputs, 'diff_loss'):
+            print(f"[DEBUG] outputs.diff_loss: {outputs.diff_loss}")
+        else:
+            print("[DEBUG] outputs has NO 'diff_loss' attribute!")
+        # ======================
+        
+        return {'outputs': outputs}
     
     @torch.no_grad()
     def val_t2t_forward(self, batch):
-        # feats_ref = batch["motion"]
         texts = batch["text"]
-        # lengths = batch["length"]
-        # all_captions = batch['all_captions']
-        # tasks = None
         tasks = [{
                 'input': ['<Caption_Placeholder>'],
                 'output': ['']
@@ -270,19 +236,13 @@ class MotGPT(BaseModel):
         
         with torch.no_grad():
             outputs = self.lm.generate_conditional(texts,
-                                                # lengths=lengths,
                                                 stage='test',
                                                 task='t2t',
                                                 tasks=tasks,
-                                                #    output_hidden_states=True
                                                 )
 
         rs_set = {
-            # "m_ref": feats_ref,
-            # "t_ref": all_captions,
-            # "t_ref": texts,
             "t_pred": outputs,
-            # "length": lengths
         }
 
         return rs_set
@@ -314,33 +274,27 @@ class MotGPT(BaseModel):
             instructions = json.load(open(instructions, 'r'))
             tasks = [instructions["Text-to-Motion"]["t2m"]] * len(texts)
 
-        # Forward, return decoder_hidden_states[-1] 
         with torch.no_grad():
             outputs = self.lm.generate_conditional(texts,
                                                 lengths=lengths,
                                                 stage='test',
                                                 tasks=tasks,
                                                 )
-        # outputs: 32,8,768
-        # todo: allow more motion sequence in output 
         sampled_token_latents, motion_mask = self.lm.sample_tokens(
             outputs, feats_ref.device, 
             temperature=1.0, cfg=self.guidance_scale, 
-            vae_mean_std_inv=self.vae.mean_std_inv) # , cfg_schedule="linear"
-        sampled_token_latents = sampled_token_latents.reshape(len(lengths), self.vae.latent_size, -1).permute(1,0,2)  # [1,bs,256]
+            vae_mean_std_inv=self.vae.mean_std_inv)
+        sampled_token_latents = sampled_token_latents.reshape(len(lengths), self.vae.latent_size, -1).permute(1,0,2)
         
-        feats_rst = self.vae.decode(sampled_token_latents, lengths)  #[bs,lengths,263]
+        feats_rst = self.vae.decode(sampled_token_latents, lengths)
         feats_rst[motion_mask==1] = torch.zeros_like(feats_ref[0, ...])
 
-        # Recover joints for evaluation
         joints_ref = self.feats2joints(feats_ref)
         joints_rst = self.feats2joints(feats_rst)
 
-        # Renorm for evaluation
         feats_ref = self.datamodule.renorm4t2m(feats_ref)
         feats_rst = self.datamodule.renorm4t2m(feats_rst)
 
-        # return set
         rs_set = {
             "m_ref": feats_ref,
             "m_rst": feats_rst,
@@ -353,7 +307,6 @@ class MotGPT(BaseModel):
 
     @torch.no_grad()
     def val_m2t_forward(self, batch):
-        # assert False, 'should not val_m2t yet'
         self.hparams.metrics_dict = []
 
         feats_ref = batch["motion"]
@@ -361,7 +314,6 @@ class MotGPT(BaseModel):
         lengths = batch["length"]
         all_captions = batch['all_captions']
 
-        # Forward
         with torch.no_grad():
             outputs = self.lm.generate_conditional(motion_feats=feats_ref,
                                                 motion_encode_net=self.vae,
@@ -370,11 +322,9 @@ class MotGPT(BaseModel):
                                                 stage='test')
 
         feats_ref = self.datamodule.renorm4t2m(feats_ref)
-        # return set
         rs_set = {
             "m_ref": feats_ref,
             "t_ref": all_captions,
-            # "t_ref": texts,
             "t_pred": outputs,
             "length": lengths
         }
@@ -383,11 +333,9 @@ class MotGPT(BaseModel):
 
     @torch.no_grad()
     def val_m2m_forward(self, batch, task="pred"):
-        # assert False, 'should not val_m2m yet'
         feats_ref = batch["motion"]
         lengths = batch["length"]
 
-        # Forward
         with torch.no_grad():
             outputs = self.lm.generate_conditional(motion_feats=feats_ref,
                                                 motion_encode_net=self.vae,
@@ -398,39 +346,31 @@ class MotGPT(BaseModel):
         sampled_token_latents, motion_mask = self.lm.sample_tokens(
             outputs, feats_ref.device, 
             temperature=1.0, cfg=self.guidance_scale, 
-            vae_mean_std_inv=self.vae.mean_std_inv) # , cfg_schedule="linear"
-        sampled_token_latents = sampled_token_latents.reshape(len(lengths), self.vae.latent_size, -1).permute(1,0,2)  # [1,bs,256]
-        feats_rst = self.vae.decode(sampled_token_latents, lengths)  # [bs,lengths,263]
+            vae_mean_std_inv=self.vae.mean_std_inv)
+        sampled_token_latents = sampled_token_latents.reshape(len(lengths), self.vae.latent_size, -1).permute(1,0,2)
+        feats_rst = self.vae.decode(sampled_token_latents, lengths)
         feats_rst[motion_mask==1] = torch.zeros_like(feats_ref[0, ...])
         
-        # Recover joints for evaluation
         joints_ref = self.feats2joints(feats_ref)
         joints_rst = self.feats2joints(feats_rst)
 
-        # Renorm for evaluation
         feats_ref = self.datamodule.renorm4t2m(feats_ref)
         feats_rst = self.datamodule.renorm4t2m(feats_rst)
 
-        # return set
         rs_set = {
             "m_ref": feats_ref,
             "m_rst": feats_rst,
             "joints_ref": joints_ref,
             "joints_rst": joints_rst,
-            # "length": min_len
             "length": lengths
         }
 
         return rs_set
 
     def train_vae_forward(self, batch):
-        # batch detach
         feats_ref = batch["motion"]
         lengths = batch["length"]
-        # motion encode & decode
-        # feats_rst, loss_commit, perplexity = self.vae(feats_ref)
 
-        # feats_rst, z, dist = self.vae(feats_ref)
         motion_z, dist_m = self.vae.encode(feats_ref, lengths)
         feats_rst = self.vae.decode(motion_z, lengths)
         recons_z, _ = self.vae.encode(feats_rst, lengths)
@@ -439,12 +379,10 @@ class MotGPT(BaseModel):
         joints_rst = self.feats2joints(feats_rst)
         
         if dist_m is not None:
-            # Create a centred normal distribution to compare with
             mu_ref = torch.zeros_like(dist_m.loc)
             scale_ref = torch.ones_like(dist_m.scale)
             dist_ref = torch.distributions.Normal(mu_ref, scale_ref)
 
-        # return set
         rs_set = {
             "m_ref": feats_ref,
             "m_rst": feats_rst,
@@ -459,30 +397,23 @@ class MotGPT(BaseModel):
 
     @torch.no_grad()
     def val_vae_forward(self, batch, split="train"):
-        # Detach batch
         feats_ref = batch["motion"].detach().clone()
         lengths = batch["length"]
-        # print('lengths', lengths)
 
-        # Repeat for multimodal evaluation
         if self.trainer.datamodule.is_mm:
             feats_ref = feats_ref.repeat_interleave(
                 self.hparams.cfg.METRIC.MM_NUM_REPEATS, dim=0)
             lengths = lengths * self.hparams.cfg.METRIC.MM_NUM_REPEATS
 
-        # Motion encode & decode
         z, dist_m = self.vae.encode(feats_ref, lengths)
         feats_rst = self.vae.decode(z, lengths)
 
-        # Recover joints for evaluation
         joints_ref = self.feats2joints(feats_ref)
         joints_rst = self.feats2joints(feats_rst)
 
-        # Renorm for evaluation
         feats_ref = self.datamodule.renorm4t2m(feats_ref)
         feats_rst = self.datamodule.renorm4t2m(feats_rst)
 
-        # Return set
         rs_set = {
             "m_ref": feats_ref,
             "joints_ref": joints_ref,
@@ -496,14 +427,12 @@ class MotGPT(BaseModel):
     def allsplit_step(self, split: str, batch, batch_idx):
         # Compute the losses
         loss = None
-        # self.hparams.task = 't2m'
         if self.hparams.stage == "vae" and split in ["train", "val"]:
             rs_set = self.train_vae_forward(batch)
             loss = self._losses['losses_' + split].update(rs_set)
         elif self.hparams.stage in ["lm_instruct", "lm_t2m", "lm_pretrain", "lm_finetune", "lm_adaptor_pretrain"
                                     ] and split in ["train"]:
             rs_set = self.train_lm_forward(batch)
-            # rs_set['diff_loss'] = self.forward_diff_loss(batch["motion"], rs_set['hidden'])
             loss = self._losses['losses_' + split].update(rs_set)
         elif self.hparams.stage == 'lm_rl' and split in ['train']:
             rs_set = self.train_rl_forward(batch)
@@ -518,14 +447,12 @@ class MotGPT(BaseModel):
                     rs_set = self.val_t2m_forward(batch)
                 elif self.hparams.task == "m2t":
                     rs_set = self.val_m2t_forward(batch)
-                # elif self.hparams.task == "t2t":
-                #     rs_set = self.val_t2t_forward(batch)
                 elif self.hparams.task in ["m2m", "pred", "inbetween"]:
                     rs_set = self.val_m2m_forward(batch, self.hparams.task)
 
             if self.hparams.task not in ["m2t","t2t"]:
-                # if batch_idx == 0:
-                if (self.current_epoch+1) and batch_idx == 0 and self.global_rank == 0:
+                # Visualization
+                if (self.current_epoch+1) % 99999 == 0 and batch_idx == 0 and self.global_rank == 0:
                     lengths = batch['length']
                     feats_ref, joints_ref = rs_set['m_ref'], rs_set['joints_ref']
                     feats_rst, joints_rst = rs_set['m_rst'], rs_set['joints_rst']
@@ -534,20 +461,16 @@ class MotGPT(BaseModel):
                         idx = idd % len(lengths)
                         output_dir = os.path.join(self.model_dir, 'validate_motion', f'epoch_{self.current_epoch}')
                         os.makedirs(output_dir, exist_ok=True)
-                        # keyid = idx
                         keyid = (batch['fname'][idx]).split('/')[-1]
-                        # keyid = self.trainer.datamodule.val_dataset.name_list[idx% len(self.trainer.datamodule.test_dataset.name_list)]
-                        # data = self.trainer.datamodule.val_dataset.data_dict[keyid]
                         motion = batch['motion'][idx]
                         joint_ref = self.feats2joints(motion)
-                    # for data, feat in zip(joints_ref, feats_ref):
                         feat_ref, joint_ref = feats_ref[idx][:lengths[idx]], joints_ref[idx][:lengths[idx]]
                         feat_rst, joint_rst = feats_rst[idx][:lengths[idx]], joints_rst[idx][:lengths[idx]]
                         render_motion(joint_ref, joint_ref.cpu().numpy(), output_dir=output_dir, fname=f'{keyid}_gt',method='fast', fps=self.fps)
-                        # render_motion(joint_rst, joint_rst.cpu().numpy(), output_dir=output_dir, fname=f'{keyid}_slow',method='slow')
                         render_motion(joint_rst, joint_rst.cpu().numpy(), output_dir=output_dir, fname=f'{keyid}',method='fast')
                         np.savetxt(os.path.join(output_dir, f'{keyid}.txt'), [batch['text'][idx]], fmt='%s')
-                # MultiModality evaluation sperately
+                
+                # MultiModality evaluation separately
                 if self.trainer.datamodule.is_mm:
                     metrics_dicts = ['MMMetrics']
                 else:
@@ -566,10 +489,10 @@ class MotGPT(BaseModel):
                         if self.hparams.stage in [
                                 "lm_instruct", "lm_t2m", "lm_pretrain", "lm_finetune", "lm_rl", "lm_adaptor_pretrain"
                         ]:
-                            word_embs = batch['word_embs']
-                            pos_ohot = batch['pos_ohot']
-                            text_lengths = batch['text_len']
-                            if self.trainer.datamodule.is_mm:
+                            word_embs = batch.get('word_embs')
+                            pos_ohot = batch.get('pos_ohot')
+                            text_lengths = batch.get('text_len')
+                            if self.trainer.datamodule.is_mm and word_embs is not None:
                                 word_embs = word_embs.repeat_interleave(
                                     self.hparams.cfg.METRIC.MM_NUM_REPEATS,
                                     dim=0)
@@ -607,16 +530,29 @@ class MotGPT(BaseModel):
                             gtmotion_embeddings=rs_set["lat_m"],
                             lengths=lengths,
                         )
+                    # ============ MRMetrics 수정됨! ============
                     elif metric == "MRMetrics":
-                        getattr(self.metrics,
-                                metric).update(rs_set["joints_rst"],
-                                               rs_set["joints_ref"], lengths)
+                        # Get src and name from batch
+                        src = batch.get('src', ['how2sign'] * len(lengths))
+                        name = batch.get('name', batch.get('fname', [f'sample_{i}' for i in range(len(lengths))]))
+                        
+                        getattr(self.metrics, metric).update(
+                            feats_rst=rs_set["m_rst"],
+                            feats_ref=rs_set["m_ref"],
+                            joints_rst=rs_set["joints_rst"],
+                            joints_ref=rs_set["joints_ref"],
+                            vertices_rst=rs_set.get("vertices_rst"),
+                            vertices_ref=rs_set.get("vertices_ref"),
+                            lengths=lengths,
+                            src=src,
+                            name=name
+                        )
+                    # ============ MRMetrics 수정 끝 ============
                     elif metric == "PredMetrics":
                         getattr(self.metrics,
                                 metric).update(rs_set["joints_rst"],
                                                rs_set["joints_ref"], lengths)
                     elif metric == "MMMetrics":
-                        # pass
                         getattr(self.metrics,
                                 metric).update(rs_set["m_rst"],
                                                rs_set['length'])
@@ -652,18 +588,16 @@ class MotGPT(BaseModel):
                             pred_texts=rs_set["t_pred"],
                             gt_texts=batch["all_captions"],
                             lengths=rs_set['length'],
-                            word_embs=batch["word_embs"],
-                            pos_ohot=batch["pos_ohot"],
-                            text_lengths=batch["text_len"],
+                            word_embs=batch.get("word_embs"),
+                            pos_ohot=batch.get("pos_ohot"),
+                            text_lengths=batch.get("text_len"),
                         )
 
         # return forward output rather than loss during test
         if split in ["test"]:
             if self.hparams.task == "t2m":
                 return rs_set["m_rst"], rs_set["length"], rs_set["m_ref"], batch['text'], batch['fname']
-                # pass
             elif self.hparams.task == "m2t":
                 return rs_set["t_pred"], batch["length"], rs_set["m_ref"], rs_set['t_ref'], batch['fname']
-                # return batch["length"]
 
         return loss

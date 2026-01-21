@@ -1,67 +1,42 @@
-# SignGPT3 LM Stage 1: Text-to-Motion Pretraining
-# SOKE 스타일 config 구조
-
-NAME: SignGPT3_lm_stage1
+NAME: SignGPT3_lm_stage1_t2m
 ACCELERATOR: 'gpu'
 NUM_NODES: 1
-DEVICE: [0, 1]
+DEVICE: [0]
 
-# ============================================
-# LM ABLATION SETTINGS
-# ============================================
 lm_ablation:
   motion_holder_repeat: 4
   holder_num_in_input: 4
   motion_holder_seq_mode: 'withse'
   with_hid_norm: False
   with_vae_latent_norm: True
-  
   multi_hidden: True
-  guidance_scale: 1.0
-  model_guidance_scale: 1.0
+  guidance_scale: 3.0
+  model_guidance_scale: 3.0
   diffusion_batch_mul: 4
   guidance_uncondp: 0.1
   predict_epsilon: True
   fake_latent_mode: 'learnable_zero'
-  
+  instruction_type: t2m
   mot_factor: 1.0
   attention_mode: 'all'
-
-# ============================================
-# ABLATION SETTINGS
-# ============================================
+  
 ABLATION:
   SKIP_CONNECT: True
   PE_TYPE: mld
   DIFF_PE_TYPE: mld
+  VAE_TYPE: mld
+  VAE_ARCH: encoder_decoder
   MLP_DIST: False
-
-# ============================================
-# TRAINING SETTINGS
-# ============================================
+  IS_DIST: False
+  PREDICT_EPSILON: True
+  
 TRAIN:
   STAGE: lm_pretrain
-  SPLIT: train
   instruction_type: t2m
-  
   NUM_WORKERS: 8
   BATCH_SIZE: 32
   END_EPOCH: 300
-
-  RESUME: ''
-  PRETRAINED: ''
-  PRETRAINED_VAE: checkpoints/sign_vae_best.ckpt
-
-  OPTIM:
-    target: AdamW
-    params:
-      lr: 8e-5
-      betas: [0.9, 0.99]
-      weight_decay: 0.0
-    params_diff:
-      lr: 1e-4
-      betas: [0.9, 0.99]
-      weight_decay: 0.0
+  PRETRAINED_VAE: /home/user/Projects/research/MotionGPT3/experiments/motgpt/SignGPT3_vae_mld/checkpoints/last.ckpt
 
   LR_SCHEDULER:
     target: CosineAnnealingLR
@@ -69,80 +44,65 @@ TRAIN:
       T_max: 1000
       eta_min: 1e-6
 
-# ============================================
-# EVALUATION SETTINGS
-# ============================================
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+    params_diff:
+      lr: 2e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+
 EVAL:
   BATCH_SIZE: 32
   SPLIT: val
-  NUM_WORKERS: 8
 
-# ============================================
-# TEST SETTINGS
-# ============================================
 TEST:
   CHECKPOINTS: ''
   SPLIT: test
   BATCH_SIZE: 32
-  NUM_WORKERS: 8
   REPLICATION_TIMES: 2
 
 # ============================================
-# DATASET SETTINGS (SOKE 스타일)
+# DATASET - Sign Language
 # ============================================
 DATASET:
   target: motGPT.data.H2S.H2SDataModule
   NFEATS: 133
-  CODE_PATH: ''
-  TASK_PATH: ''
-  
-  WORD_VERTILIZER_PATH: deps/t2m/glove/
-  
+  CODE_PATH: TOKENS
   H2S:
-    DATASET_NAME: how2sign_csl_phoenix
+    # DATASET_NAME: how2sign_csl_phoenix
+    DATASET_NAME: phoenix
     ROOT: /home/user/Projects/research/SOKE/data/How2Sign
     CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
     PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
     MEAN_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt
     STD_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/std.pt
-    MAX_MOTION_LEN: 400
-    MIN_MOTION_LEN: 40
-    MAX_TEXT_LEN: 20
-    PICK_ONE_TEXT: true
-    FRAME_RATE: 20.0
     UNIT_LEN: 4
-    STD_TEXT: False
+    FPS: 25
+    MAX_MOTION_LEN: 300
+    MIN_MOTION_LEN: 24
 
-# ============================================
-# METRIC SETTINGS
-# ============================================
 METRIC:
-  TYPE: ['TM2TMetrics']
-  FORCE_IN_METER: True
-  DIST_SYNC_ON_STEP: True
-  MM_NUM_SAMPLES: 100
-  MM_NUM_REPEATS: 30
-  MM_NUM_TIMES: 10
-  DIVERSITY_TIMES: 300
+  TYPE: ['MRMetrics']
 
-# ============================================
-# LOSS SETTINGS
-# ============================================
 LOSS:
   LAMBDA_FEATURE: 1.0
   LAMBDA_VELOCITY: 0.0
   LAMBDA_COMMIT: 0.02
-  LAMBDA_CLS: 1.0
-  LAMBDA_DIFF: 0.5
-  
+  LAMBDA_CLS: 0.0
+  LAMBDA_DIFF: 1.0
   ABLATION:
     RECONS_LOSS: 'l1_smooth'
 
 # ============================================
-# MODEL SETTINGS
+# MODEL
 # ============================================
 model:
-  target: motGPT.models.motgpt.MotGPT
+  target: motGPT.models.motgpt_2optimizer.MotGPT
+  diff_loss: ${lm.diffloss}
   params:
     condition: 'text'
     task: 't2m'
@@ -152,10 +112,13 @@ model:
     attention_mode: 'all'
     guidance_scale: ${lm_ablation.model_guidance_scale}
     with_vae_latent_norm: ${lm_ablation.with_vae_latent_norm}
-  diff_loss: ${lm.diffloss}
+    stage: ${TRAIN.STAGE}
+    debug: ${DEBUG}
+    codebook_size: 512
+    metrics_dict: ${METRIC.TYPE}
 
 # ============================================
-# VAE ARCHITECTURE
+# VAE (원본 그대로 + nfeats만 변경)
 # ============================================
 vae:
   mldvae:
@@ -170,12 +133,15 @@ vae:
       activation: 'gelu'
       position_embedding: 'learned'
       latent_dim: [1, 256]
+      code_num: 512
+      guidance_scale: 3.0
+      guidance_uncondp: 0.1
+      datatype: ${DATASET.target}
       nfeats: ${DATASET.NFEATS}
       ablation: ${ABLATION}
-      datatype: 'signlanguage'
 
 # ============================================
-# LANGUAGE MODEL ARCHITECTURE
+# LM (원본 그대로)
 # ============================================
 lm:
   mot_vae_gpt2:
@@ -184,10 +150,10 @@ lm:
       model_type: gpt2
       model_path: deps/mot-gpt2
       stage: ${TRAIN.STAGE}
+      motion_codebook_size: ${model.params.codebook_size}
       mot_factor: ${lm_ablation.mot_factor}
       attention_mode: ${lm_ablation.attention_mode}
       ablation: ${ABLATION}
-      
       diffhead: ${model.diff_loss}
       diffusion_batch_mul: ${lm_ablation.diffusion_batch_mul}
       guidance_uncondp: ${lm_ablation.guidance_uncondp}
@@ -201,30 +167,28 @@ lm:
       with_vae_latent_norm: ${lm_ablation.with_vae_latent_norm}
 
   diffloss:
-    target: motGPT.archs.diffloss.DiffLoss
+    target: motGPT.diffusion.diffloss.DiffLoss
     params:
-      target_channels: 256
-      z_channels: 256
-      depth: 3
       width: 1024
+      depth: 3
+      multi_hidden: ${lm_ablation.multi_hidden}
       num_sampling_steps: '100'
-      grad_checkpointing: false
-      ablation: ${ABLATION}
+      noise_schedule: 'scaled_linear'
+      learn_sigma: False
+      sigma_small: True
+      grad_checkpointing: False
 
 # ============================================
-# LOGGER SETTINGS
+# LOGGER
 # ============================================
 LOGGER:
   TYPE: ['tensorboard', 'wandb']
   VAL_EVERY_STEPS: 10
   WANDB:
     params:
+      tags: ['sign', 't2m', 'stage1']
       project: signgpt3
-      tags: ['lm', 'stage1', 't2m']
 
-# ============================================
-# OTHER SETTINGS
-# ============================================
-SEED_VALUE: 1234
+FOLDER: experiments/signgpt3
 DEBUG: False
-FULL_CONFIG: false
+SEED_VALUE: 1234

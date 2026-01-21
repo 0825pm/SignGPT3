@@ -303,17 +303,27 @@ class MRMetrics(Metric):
         gc.collect()
 
     def compute(self, sanity_flag=False):
-        """Compute final metrics"""
+        """
+        Compute final metrics.
+        Returns 0 for sources with no data (instead of skipping).
+        """
         metrics = {}
         
         for src in self.sources:
             count = getattr(self, f'{src}_count')
             count_seq = getattr(self, f'{src}_count_seq')
-            
-            if count_seq == 0:
-                continue
-            
             count_val = count.item() if isinstance(count, torch.Tensor) else count
+            
+            # ========== 핵심 수정: 데이터 없으면 0 반환 ==========
+            if count_seq == 0:
+                # No data for this source - return 0 for all metrics
+                metrics[f'{src}_feat_error'] = torch.tensor(0.0)
+                metrics[f'{src}_feat_error_hand'] = torch.tensor(0.0)
+                for part in ['body', 'lhand', 'rhand', 'hand']:
+                    metrics[f'{src}_MPJPE_{part}'] = torch.tensor(0.0)
+                    metrics[f'{src}_MPJPE_PA_{part}'] = torch.tensor(0.0)
+                continue
+            # ====================================================
             
             # Feature errors
             feat_error = getattr(self, f'{src}_feat_error') / max(count_val, 1)
@@ -336,10 +346,17 @@ class MRMetrics(Metric):
             print("\n" + "=" * 50)
             print("=== MRMetrics Results ===")
             print("=" * 50)
-            for name, value in sorted(metrics.items()):
-                if isinstance(value, torch.Tensor):
-                    value = value.item()
-                print(f"  {name}: {value:.4f}")
+            for src in self.sources:
+                count_seq = getattr(self, f'{src}_count_seq')
+                if count_seq > 0:
+                    print(f"\n[{src}] ({count_seq} sequences)")
+                    for name in sorted([k for k in metrics.keys() if k.startswith(src)]):
+                        value = metrics[name]
+                        if isinstance(value, torch.Tensor):
+                            value = value.item()
+                        print(f"  {name}: {value:.4f}")
+                else:
+                    print(f"\n[{src}] No data (all metrics = 0)")
             print("=" * 50 + "\n")
         
         self.reset()

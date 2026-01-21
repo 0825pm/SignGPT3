@@ -1,7 +1,5 @@
 """
 SOKE-style Collate Functions for Sign Language Datasets
-
-Handles batching with dataset source (src) for per-dataset metrics.
 """
 
 import torch
@@ -12,22 +10,6 @@ from typing import List, Tuple, Any
 def sign_collate(batch: List[Tuple]) -> dict:
     """
     Collate function for sign language datasets.
-    
-    Handles variable-length sequences with padding and
-    tracks dataset source (src) for SOKE-style metrics.
-    
-    Expected batch item format (10 elements):
-        (text, motion, length, name, m_tokens, m_tokens_len, 
-         word_emb, pos_ohot, text_len, src)
-    
-    Returns:
-        dict with keys:
-            - motion: (B, max_len, D) padded motion features
-            - length: List[int] sequence lengths
-            - text: List[str] text descriptions
-            - name: List[str] sample names
-            - src: List[str] dataset sources ('how2sign', 'csl', 'phoenix')
-            - word_emb, pos_ohot, text_len: optional text features
     """
     # Filter out None items
     batch = [b for b in batch if b is not None]
@@ -36,12 +18,11 @@ def sign_collate(batch: List[Tuple]) -> dict:
         return None
     
     # Unpack batch
-    # Format: (text, motion, length, name, m_tokens, m_tokens_len, word_emb, pos_ohot, text_len, src)
     texts = [b[0] for b in batch]
     motions = [b[1] for b in batch]
     lengths = [b[2] for b in batch]
     names = [b[3] for b in batch]
-    srcs = [b[9] for b in batch]  # Dataset source
+    srcs = [b[9] if len(b) > 9 else 'how2sign' for b in batch]
     
     # Get batch size and max length
     batch_size = len(batch)
@@ -55,46 +36,59 @@ def sign_collate(batch: List[Tuple]) -> dict:
             motion = torch.from_numpy(motion).float()
         motion_padded[i, :length] = motion[:length]
     
+    # Default tasks for LM training (t2m task)
+    tasks = [{
+        'input': ['Generate motion: <Caption_Placeholder>'],
+        'output': [''],
+        'class': 't2m'  # ← 추가됨!
+    }] * batch_size
+    
     # Build output dict
     output = {
         'motion': motion_padded,
         'length': lengths,
         'text': texts,
         'name': names,
-        'src': srcs,  # ★ For SOKE-style metrics
+        'fname': names,
+        'src': srcs,
+        'tasks': tasks,
+        'all_captions': [[t] for t in texts],
     }
     
     # Handle optional fields (m_tokens, word_emb, etc.)
-    m_tokens = [b[4] for b in batch]
-    if m_tokens[0] is not None:
-        # Pad m_tokens
-        m_tokens_lens = [b[5] for b in batch]
-        max_token_len = max(m_tokens_lens) if m_tokens_lens[0] is not None else 0
-        
-        if max_token_len > 0:
-            tokens_padded = torch.zeros(batch_size, max_token_len, dtype=torch.long)
-            for i, (tokens, t_len) in enumerate(zip(m_tokens, m_tokens_lens)):
-                if tokens is not None:
-                    tokens_padded[i, :t_len] = tokens[:t_len]
-            output['m_tokens'] = tokens_padded
-            output['m_tokens_len'] = m_tokens_lens
+    if len(batch[0]) > 4:
+        m_tokens = [b[4] for b in batch]
+        if m_tokens[0] is not None:
+            m_tokens_lens = [b[5] for b in batch]
+            max_token_len = max(m_tokens_lens) if m_tokens_lens[0] is not None else 0
+            
+            if max_token_len > 0:
+                tokens_padded = torch.zeros(batch_size, max_token_len, dtype=torch.long)
+                for i, (tokens, t_len) in enumerate(zip(m_tokens, m_tokens_lens)):
+                    if tokens is not None:
+                        tokens_padded[i, :t_len] = tokens[:t_len]
+                output['m_tokens'] = tokens_padded
+                output['m_tokens_len'] = m_tokens_lens
     
     # Word embeddings
-    word_embs = [b[6] for b in batch]
-    if word_embs[0] is not None:
-        word_emb_padded = torch.stack(word_embs)
-        output['word_embs'] = word_emb_padded
+    if len(batch[0]) > 6:
+        word_embs = [b[6] for b in batch]
+        if word_embs[0] is not None:
+            word_emb_padded = torch.stack(word_embs)
+            output['word_embs'] = word_emb_padded
     
     # POS one-hot
-    pos_ohots = [b[7] for b in batch]
-    if pos_ohots[0] is not None:
-        pos_ohot_padded = torch.stack(pos_ohots)
-        output['pos_ohot'] = pos_ohot_padded
+    if len(batch[0]) > 7:
+        pos_ohots = [b[7] for b in batch]
+        if pos_ohots[0] is not None:
+            pos_ohot_padded = torch.stack(pos_ohots)
+            output['pos_ohot'] = pos_ohot_padded
     
     # Text lengths
-    text_lens = [b[8] for b in batch]
-    if text_lens[0] is not None:
-        output['text_len'] = torch.tensor(text_lens)
+    if len(batch[0]) > 8:
+        text_lens = [b[8] for b in batch]
+        if text_lens[0] is not None:
+            output['text_len'] = torch.tensor(text_lens)
     
     return output
 
@@ -102,11 +96,6 @@ def sign_collate(batch: List[Tuple]) -> dict:
 def sign_collate_simple(batch: List[Tuple]) -> dict:
     """
     Simplified collate function for VAE training.
-    
-    Expects minimal format: (text, motion, length, name, ..., src)
-    
-    Returns:
-        dict with motion, length, name, src
     """
     batch = [b for b in batch if b is not None]
     
@@ -117,7 +106,7 @@ def sign_collate_simple(batch: List[Tuple]) -> dict:
     motions = [b[1] for b in batch]
     lengths = [b[2] for b in batch]
     names = [b[3] for b in batch]
-    srcs = [b[-1] for b in batch]  # Last element is src
+    srcs = [b[-1] if len(b) > 4 else 'how2sign' for b in batch]
     
     batch_size = len(batch)
     max_len = max(lengths)
@@ -135,5 +124,6 @@ def sign_collate_simple(batch: List[Tuple]) -> dict:
         'length': lengths,
         'text': texts,
         'name': names,
+        'fname': names,
         'src': srcs,
     }
