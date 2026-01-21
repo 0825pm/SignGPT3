@@ -14,16 +14,16 @@ LOGGER:
   PROJECT: signgpt3
   OFFLINE: True
   SAVE_DIR: experiments/signgpt3/logs
-  VAL_EVERY_STEPS: 1
+  VAL_EVERY_STEPS: 10
 
 TRAIN:
   STAGE: vae
-  BATCH_SIZE: 256
+  BATCH_SIZE: 128
   END_EPOCH: 2000
   RESUME: ''
   PRETRAINED: ''
   PRETRAINED_VAE: ''
-  NUM_WORKERS: 4
+  NUM_WORKERS: 8
   instruction_type: 'caption'
   
   OPTIM:
@@ -63,6 +63,7 @@ DATASET:
   
   H2S:
     DATASET_NAME: how2sign_csl_phoenix
+    # DATASET_NAME: phoenix
     ROOT: /home/user/Projects/research/SOKE/data/How2Sign
     CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
     PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T

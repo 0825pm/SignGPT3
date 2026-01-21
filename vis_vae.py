@@ -46,6 +46,7 @@ SOKE_RHAND_DIM = 45     # right hand (15 joints × 3)
 SOKE_JAW_DIM = 3        # jaw (1 joint × 3)
 SOKE_EXPR_DIM = 10      # expression
 SOKE_TOTAL_DIM = 133
+POSE_SCALE = 2.0
 
 
 # =============================================================================
@@ -122,7 +123,7 @@ def save_comparison_video(gt_joints, recon_joints, save_path, title='', fps=20):
     x_min, x_max = all_x.min(), all_x.max()
     y_min, y_max = all_y.min(), all_y.max()
     
-    max_range = max(x_max - x_min, y_max - y_min) * 1.3
+    max_range = max(x_max - x_min, y_max - y_min) * 1.2
     x_mid = (x_max + x_min) / 2
     y_mid = (y_max + y_min) / 2
     
@@ -620,6 +621,8 @@ def main():
                                 gt_joints = gt_result
                                 recon_joints = recon_result
                             
+                            gt_joints = gt_joints * POSE_SCALE
+                            recon_joints = recon_joints * POSE_SCALE
                             gt_joints_np = gt_joints.cpu().numpy()
                             recon_joints_np = recon_joints.cpu().numpy()
                             
