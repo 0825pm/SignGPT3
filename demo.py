@@ -138,7 +138,7 @@ def main():
         logger.info("Loading checkpoints from {}".format(cfg.TEST.CHECKPOINTS))
         state_dict = torch.load(cfg.TEST.CHECKPOINTS,
                                 map_location="cpu")["state_dict"]
-        msg = model.load_state_dict(state_dict, strict=False)
+        model.load_state_dict(state_dict, strict=False)
     else:
         logger.warning(
             "No checkpoints provided, using random initialized model")

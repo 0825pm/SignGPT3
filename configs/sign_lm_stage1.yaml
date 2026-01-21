@@ -1,0 +1,230 @@
+# SignGPT3 LM Stage 1: Text-to-Motion Pretraining
+# SOKE 스타일 config 구조
+
+NAME: SignGPT3_lm_stage1
+ACCELERATOR: 'gpu'
+NUM_NODES: 1
+DEVICE: [0, 1]
+
+# ============================================
+# LM ABLATION SETTINGS
+# ============================================
+lm_ablation:
+  motion_holder_repeat: 4
+  holder_num_in_input: 4
+  motion_holder_seq_mode: 'withse'
+  with_hid_norm: False
+  with_vae_latent_norm: True
+  
+  multi_hidden: True
+  guidance_scale: 1.0
+  model_guidance_scale: 1.0
+  diffusion_batch_mul: 4
+  guidance_uncondp: 0.1
+  predict_epsilon: True
+  fake_latent_mode: 'learnable_zero'
+  
+  mot_factor: 1.0
+  attention_mode: 'all'
+
+# ============================================
+# ABLATION SETTINGS
+# ============================================
+ABLATION:
+  SKIP_CONNECT: True
+  PE_TYPE: mld
+  DIFF_PE_TYPE: mld
+  MLP_DIST: False
+
+# ============================================
+# TRAINING SETTINGS
+# ============================================
+TRAIN:
+  STAGE: lm_pretrain
+  SPLIT: train
+  instruction_type: t2m
+  
+  NUM_WORKERS: 8
+  BATCH_SIZE: 32
+  END_EPOCH: 300
+
+  RESUME: ''
+  PRETRAINED: ''
+  PRETRAINED_VAE: checkpoints/sign_vae_best.ckpt
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 8e-5
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+    params_diff:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 1000
+      eta_min: 1e-6
+
+# ============================================
+# EVALUATION SETTINGS
+# ============================================
+EVAL:
+  BATCH_SIZE: 32
+  SPLIT: val
+  NUM_WORKERS: 8
+
+# ============================================
+# TEST SETTINGS
+# ============================================
+TEST:
+  CHECKPOINTS: ''
+  SPLIT: test
+  BATCH_SIZE: 32
+  NUM_WORKERS: 8
+  REPLICATION_TIMES: 2
+
+# ============================================
+# DATASET SETTINGS (SOKE 스타일)
+# ============================================
+DATASET:
+  target: motGPT.data.H2S.H2SDataModule
+  NFEATS: 133
+  CODE_PATH: ''
+  TASK_PATH: ''
+  
+  WORD_VERTILIZER_PATH: deps/t2m/glove/
+  
+  H2S:
+    DATASET_NAME: how2sign_csl_phoenix
+    ROOT: /home/user/Projects/research/SOKE/data/How2Sign
+    CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
+    PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
+    MEAN_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt
+    STD_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/std.pt
+    MAX_MOTION_LEN: 400
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 20
+    PICK_ONE_TEXT: true
+    FRAME_RATE: 20.0
+    UNIT_LEN: 4
+    STD_TEXT: False
+
+# ============================================
+# METRIC SETTINGS
+# ============================================
+METRIC:
+  TYPE: ['TM2TMetrics']
+  FORCE_IN_METER: True
+  DIST_SYNC_ON_STEP: True
+  MM_NUM_SAMPLES: 100
+  MM_NUM_REPEATS: 30
+  MM_NUM_TIMES: 10
+  DIVERSITY_TIMES: 300
+
+# ============================================
+# LOSS SETTINGS
+# ============================================
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.0
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 1.0
+  LAMBDA_DIFF: 0.5
+  
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+# ============================================
+# MODEL SETTINGS
+# ============================================
+model:
+  target: motGPT.models.motgpt.MotGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.mot_vae_gpt2}
+    motion_vae: ${vae.mldvae}
+    mot_factor: 1.0
+    attention_mode: 'all'
+    guidance_scale: ${lm_ablation.model_guidance_scale}
+    with_vae_latent_norm: ${lm_ablation.with_vae_latent_norm}
+  diff_loss: ${lm.diffloss}
+
+# ============================================
+# VAE ARCHITECTURE
+# ============================================
+vae:
+  mldvae:
+    target: motGPT.archs.mld_vae.MldVae
+    params:
+      arch: 'encoder_decoder'
+      ff_size: 1024
+      num_layers: 9
+      num_heads: 4
+      dropout: 0.1
+      normalize_before: false
+      activation: 'gelu'
+      position_embedding: 'learned'
+      latent_dim: [1, 256]
+      nfeats: ${DATASET.NFEATS}
+      ablation: ${ABLATION}
+      datatype: 'signlanguage'
+
+# ============================================
+# LANGUAGE MODEL ARCHITECTURE
+# ============================================
+lm:
+  mot_vae_gpt2:
+    target: motGPT.archs.motgpt_lm.MLM
+    params:
+      model_type: gpt2
+      model_path: deps/mot-gpt2
+      stage: ${TRAIN.STAGE}
+      mot_factor: ${lm_ablation.mot_factor}
+      attention_mode: ${lm_ablation.attention_mode}
+      ablation: ${ABLATION}
+      
+      diffhead: ${model.diff_loss}
+      diffusion_batch_mul: ${lm_ablation.diffusion_batch_mul}
+      guidance_uncondp: ${lm_ablation.guidance_uncondp}
+      predict_epsilon: ${lm_ablation.predict_epsilon}
+      guidance_scale: ${lm_ablation.guidance_scale}
+      fake_latent_mode: ${lm_ablation.fake_latent_mode}
+      motion_holder_repeat: ${lm_ablation.motion_holder_repeat}
+      holder_num_in_input: ${lm_ablation.holder_num_in_input}
+      motion_holder_seq_mode: ${lm_ablation.motion_holder_seq_mode}
+      with_hid_norm: ${lm_ablation.with_hid_norm}
+      with_vae_latent_norm: ${lm_ablation.with_vae_latent_norm}
+
+  diffloss:
+    target: motGPT.archs.diffloss.DiffLoss
+    params:
+      target_channels: 256
+      z_channels: 256
+      depth: 3
+      width: 1024
+      num_sampling_steps: '100'
+      grad_checkpointing: false
+      ablation: ${ABLATION}
+
+# ============================================
+# LOGGER SETTINGS
+# ============================================
+LOGGER:
+  TYPE: ['tensorboard', 'wandb']
+  VAL_EVERY_STEPS: 10
+  WANDB:
+    params:
+      project: signgpt3
+      tags: ['lm', 'stage1', 't2m']
+
+# ============================================
+# OTHER SETTINGS
+# ============================================
+SEED_VALUE: 1234
+DEBUG: False
+FULL_CONFIG: false

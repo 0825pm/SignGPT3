@@ -10,8 +10,13 @@ mot_gpt2/
 save_model_weights.py
 mGPTv3/
 motGPT-0/
+vis_output/
+deps/
+checkpoints/
 README0.md
 # app.py
 # assets/*
 test_folder.py
 ig-*.py
+checkpoints/
+*.ckpt

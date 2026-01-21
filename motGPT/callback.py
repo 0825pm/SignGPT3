@@ -1,3 +1,6 @@
+"""
+SOKE-style callbacks for SignGPT3 training
+"""
 import os
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import Callback, RichProgressBar, ModelCheckpoint
@@ -5,7 +8,6 @@ from pytorch_lightning.callbacks import Callback, RichProgressBar, ModelCheckpoi
 
 def build_callbacks(cfg, logger=None, phase='test', **kwargs):
     callbacks = []
-    logger = logger
 
     # Rich Progress Bar
     callbacks.append(progressBar())
@@ -16,33 +18,32 @@ def build_callbacks(cfg, logger=None, phase='test', **kwargs):
         
     return callbacks
 
+
 def getCheckpointCallback(cfg, logger=None, **kwargs):
     callbacks = []
-    # Logging
+    
+    # Logging metric monitor (for progress logger)
     metric_monitor = {
         "loss_total": "total/train",
         "Train_jf": "recons/text2jfeats/train",
         "Val_jf": "recons/text2jfeats/val",
         "Train_rf": "recons/text2rfeats/train",
         "Val_rf": "recons/text2rfeats/val",
-        "APE root": "Metrics/APE_root",
-        "APE mean pose": "Metrics/APE_mean_pose",
-        "AVE root": "Metrics/AVE_root",
-        "AVE mean pose": "Metrics/AVE_mean_pose",
-        "R_TOP_1": "Metrics/R_precision_top_1",
-        "R_TOP_2": "Metrics/R_precision_top_2",
-        "R_TOP_3": "Metrics/R_precision_top_3",
-        "gt_R_TOP_3": "Metrics/gt_R_precision_top_3",
-        "FID": "Metrics/FID",
-        "gt_FID": "Metrics/gt_FID",
-        "Diversity": "Metrics/Diversity",
-        "MM dist": "Metrics/Matching_score",
-        "Accuracy": "Metrics/accuracy",
+        # MRMetrics - per dataset
+        "how2sign_MPJPE_PA_hand": "Metrics/how2sign_MPJPE_PA_hand",
+        "how2sign_MPVPE_PA_all": "Metrics/how2sign_MPVPE_PA_all",
+        "how2sign_feat_error": "Metrics/how2sign_feat_error",
+        "csl_MPJPE_PA_hand": "Metrics/csl_MPJPE_PA_hand",
+        "csl_MPVPE_PA_all": "Metrics/csl_MPVPE_PA_all",
+        "csl_feat_error": "Metrics/csl_feat_error",
+        "phoenix_MPJPE_PA_hand": "Metrics/phoenix_MPJPE_PA_hand",
+        "phoenix_MPVPE_PA_all": "Metrics/phoenix_MPVPE_PA_all",
+        "phoenix_feat_error": "Metrics/phoenix_feat_error",
     }
     callbacks.append(
-        progressLogger(logger,metric_monitor=metric_monitor,log_every_n_steps=1))
+        progressLogger(logger, metric_monitor=metric_monitor, log_every_n_steps=1))
 
-    # Save 10 latest checkpoints
+    # Base checkpoint params
     checkpointParams = {
         'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
         'filename': "{epoch}",
@@ -51,108 +52,88 @@ def getCheckpointCallback(cfg, logger=None, **kwargs):
         'every_n_epochs': cfg.LOGGER.VAL_EVERY_STEPS,
         'save_top_k': 1,
         'save_last': True,
-        'save_on_train_epoch_end': True
+        'save_on_train_epoch_end': False,  # Save on validation end
     }
+    
+    # Save last checkpoint
     callbacks.append(ModelCheckpoint(**checkpointParams))
 
-    # Save checkpoint every n*5 epochs
-    checkpointParams.update({
-        'every_n_epochs':
-        cfg.LOGGER.VAL_EVERY_STEPS*5,
-        'save_top_k':
-        -1,
-        'save_last':
-        False
-    })
-    callbacks.append(ModelCheckpoint(**checkpointParams))
-
+    # Metric-based checkpoints (SOKE style)
     metrics = cfg.METRIC.TYPE
+    
+    # Define metric monitor map for each metric type
     metric_monitor_map = {
+        'MRMetrics': {
+            'Metrics/how2sign_MPJPE_PA_hand': {
+                'abbr': 'how2sign_MPJPE_PA_hand',
+                'mode': 'min'
+            },
+            'Metrics/csl_MPJPE_PA_hand': {
+                'abbr': 'csl_MPJPE_PA_hand',
+                'mode': 'min'
+            },
+            'Metrics/phoenix_MPJPE_PA_hand': {
+                'abbr': 'phoenix_MPJPE_PA_hand',
+                'mode': 'min'
+            },
+            'Metrics/how2sign_feat_error': {
+                'abbr': 'how2sign_feat_error',
+                'mode': 'min'
+            },
+            'Metrics/csl_feat_error': {
+                'abbr': 'csl_feat_error',
+                'mode': 'min'
+            },
+            'Metrics/phoenix_feat_error': {
+                'abbr': 'phoenix_feat_error',
+                'mode': 'min'
+            },
+        },
+        'TM2TMetrics': {
+            'Metrics/how2sign_DTW_MPJPE_PA_lhand': {
+                'abbr': 'how2sign_DTW_lhand',
+                'mode': 'min'
+            },
+            'Metrics/csl_DTW_MPJPE_PA_lhand': {
+                'abbr': 'csl_DTW_lhand',
+                'mode': 'min'
+            },
+            'Metrics/phoenix_DTW_MPJPE_PA_lhand': {
+                'abbr': 'phoenix_DTW_lhand',
+                'mode': 'min'
+            },
+        },
         'TemosMetric': {
             'Metrics/APE_root': {
                 'abbr': 'APEroot',
                 'mode': 'min'
             },
         },
-        'M2TMetrics': {
-            'Metrics/Matching_score':{
-                'abbr': 'MMDist',
-                'mode': 'min'
-            },
-            'Metrics/R_precision_top_3': {
-                'abbr': 'R3',
-                'mode': 'max'
-            }
-        },
-        'TM2TMetrics': {
-            'Metrics/FID': {
-                'abbr': 'FID',
-                'mode': 'min'
-            },
-            'Metrics/R_precision_top_3': {
-                'abbr': 'R3',
-                'mode': 'max'
-            }
-        },
-        'MRMetrics': {
-            'Metrics/MPJPE': {
-                'abbr': 'MPJPE',
-                'mode': 'min'
-            }
-        },
-        'HUMANACTMetrics': {
-            'Metrics/Accuracy': {
-                'abbr': 'Accuracy',
-                'mode': 'max'
-            }
-        },
-        'UESTCMetrics': {
-            'Metrics/Accuracy': {
-                'abbr': 'Accuracy',
-                'mode': 'max'
-            }
-        },
-        'UncondMetrics': {
-            'Metrics/FID': {
-                'abbr': 'FID',
-                'mode': 'min'
-            }
-        }
     }
 
-    checkpointParams.update({
-        'every_n_epochs': cfg.LOGGER.VAL_EVERY_STEPS,
-        'save_top_k': 1,
-    })
-
+    # Create checkpoint callbacks for each monitored metric
     for metric in metrics:
-        if metric in metric_monitor_map.keys():
+        if metric in metric_monitor_map:
             metric_monitors = metric_monitor_map[metric]
 
-            # Delete R3 if training VAE
-            if cfg.TRAIN.STAGE == 'vae' and metric == 'TM2TMetrics':
-                del metric_monitors['Metrics/R_precision_top_3']
-            elif 'MotionX' in cfg.DATASET.target and metric == 'TM2TMetrics':
-                del metric_monitors['Metrics/R_precision_top_3']
-
-            for metric_monitor in metric_monitors:
-                checkpointParams.update({
-                    'filename':
-                    metric_monitor_map[metric][metric_monitor]['mode']
-                    + "-" +
-                    metric_monitor_map[metric][metric_monitor]['abbr']
-                    + "{ep}",
-                    'monitor':
-                    metric_monitor,
-                    'mode':
-                    metric_monitor_map[metric][metric_monitor]['mode'],
-                })
-                callbacks.append(
-                    ModelCheckpoint(**checkpointParams))
+            for metric_monitor, metric_info in metric_monitors.items():
+                ckpt_params = {
+                    'dirpath': os.path.join(cfg.FOLDER_EXP, "checkpoints"),
+                    'filename': f"{metric_info['mode']}-{metric_info['abbr']}" + "{epoch}",
+                    'monitor': metric_monitor,
+                    'mode': metric_info['mode'],
+                    'every_n_epochs': cfg.LOGGER.VAL_EVERY_STEPS,
+                    'save_top_k': 1,
+                    'save_last': False,
+                    'save_on_train_epoch_end': False,
+                }
+                callbacks.append(ModelCheckpoint(**ckpt_params))
+                
     return callbacks
 
+
 class progressBar(RichProgressBar):
-    def __init__(self, ):
+    def __init__(self):
         super().__init__()
 
     def get_metrics(self, trainer, model):
@@ -161,13 +142,13 @@ class progressBar(RichProgressBar):
         items.pop("v_num", None)
         return items
 
+
 class progressLogger(Callback):
     def __init__(self,
                  logger,
                  metric_monitor: dict,
                  precision: int = 3,
                  log_every_n_steps: int = 1):
-        # Metric to monitor
         self.logger = logger
         self.metric_monitor = metric_monitor
         self.precision = precision
@@ -175,16 +156,19 @@ class progressLogger(Callback):
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule,
                        **kwargs) -> None:
-        self.logger.info("Training started")
+        if self.logger:
+            self.logger.info("Training started")
 
     def on_train_end(self, trainer: Trainer, pl_module: LightningModule,
                      **kwargs) -> None:
-        self.logger.info("Training done")
+        if self.logger:
+            self.logger.info("Training done")
 
     def on_validation_epoch_end(self, trainer: Trainer,
                                 pl_module: LightningModule, **kwargs) -> None:
         if trainer.sanity_checking:
-            self.logger.info("Sanity checking ok.")
+            if self.logger:
+                self.logger.info("Sanity checking ok.")
 
     def on_train_epoch_end(self,
                            trainer: Trainer,
@@ -194,7 +178,7 @@ class progressLogger(Callback):
         metric_format = f"{{:.{self.precision}e}}"
         line = f"Epoch {trainer.current_epoch}"
         if padding:
-            line = f"{line:>{len('Epoch xxxx')}}"  # Right padding
+            line = f"{line:>{len('Epoch xxxx')}}"
 
         if trainer.current_epoch % self.log_every_n_steps == 0:
             metrics_str = []
@@ -209,4 +193,5 @@ class progressLogger(Callback):
 
             line = line + ": " + "   ".join(metrics_str)
 
-        self.logger.info(line)
+        if self.logger:
+            self.logger.info(line)
