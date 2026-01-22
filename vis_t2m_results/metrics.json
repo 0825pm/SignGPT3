@@ -5,7 +5,7 @@
     "src": "how2sign",
     "text": "We're going to work on a arm drill that will help you have graceful hand movements in front of you.",
     "length": 188,
-    "mpjpe": 0.23804105818271637
+    "mpjpe": 0.18423494696617126
   },
   {
     "idx": 1,
@@ -13,6 +13,6 @@
     "src": "how2sign",
     "text": "So we're going to go up and down; let's switch hands, down and up; down and up.",
     "length": 172,
-    "mpjpe": 0.15940256416797638
+    "mpjpe": 0.17826581001281738
   }
 ]

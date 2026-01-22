@@ -74,7 +74,7 @@ DATASET:
   CODE_PATH: TOKENS
   H2S:
     # DATASET_NAME: how2sign_csl_phoenix
-    DATASET_NAME: phoenix
+    DATASET_NAME: how2sign
     ROOT: /home/user/Projects/research/SOKE/data/How2Sign
     CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
     PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
@@ -192,3 +192,5 @@ LOGGER:
 FOLDER: experiments/signgpt3
 DEBUG: False
 SEED_VALUE: 1234
+TINY: True
+TINY_SIZE: 32

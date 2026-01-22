@@ -234,6 +234,8 @@ class H2SDataModule(LightningDataModule):
     
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for each stage."""
+        from torch.utils.data import Subset  # 추가
+        
         common_kwargs = {
             'data_root': self.data_root,
             'csl_root': self.csl_root,
@@ -251,9 +253,24 @@ class H2SDataModule(LightningDataModule):
         else:
             DatasetClass = SignText2MotionDataset
         
+        # =========== [TINY MODE] 추가 ===========
+        tiny = self.cfg.get('TINY', False)
+        tiny_size = self.cfg.get('TINY_SIZE', 32)
+        # ========================================
+        
         if stage == 'fit' or stage is None:
-            self.train_dataset = DatasetClass(split='train', **common_kwargs)
-            self.val_dataset = DatasetClass(split='val', **common_kwargs)
+            train_full = DatasetClass(split='train', **common_kwargs)
+            val_full = DatasetClass(split='val', **common_kwargs)
+            
+            # =========== [TINY MODE] 추가 ===========
+            if tiny:
+                print(f"🔬 [TINY MODE] Train: {min(tiny_size, len(train_full))}, Val: {min(tiny_size//4, len(val_full))}")
+                self.train_dataset = Subset(train_full, list(range(min(tiny_size, len(train_full)))))
+                self.val_dataset = Subset(val_full, list(range(min(tiny_size//4, len(val_full)))))
+            else:
+                self.train_dataset = train_full
+                self.val_dataset = val_full
+            # ========================================
         
         if stage == 'test' or stage is None:
             if self.stage == 'vae':

@@ -196,14 +196,6 @@ class MotGPT(BaseModel):
             
         return outputs
 
-    # def train_lm_forward(self, batch):
-    #     feats_ref = batch["motion"]
-    #     texts = batch["text"]
-    #     lengths = batch["length"]
-    #     tasks = batch["tasks"]
-
-    #     outputs = self.lm(texts, feats_ref, self.vae, lengths, tasks)
-    #     return {'outputs': outputs}
     def train_lm_forward(self, batch):
         feats_ref = batch["motion"]
         texts = batch["text"]
@@ -211,19 +203,6 @@ class MotGPT(BaseModel):
         tasks = batch["tasks"]
 
         outputs = self.lm(texts, feats_ref, self.vae, lengths, tasks)
-        
-        # ===== 디버깅 추가 =====
-        print(f"[DEBUG] outputs type: {type(outputs)}")
-        if hasattr(outputs, 'loss'):
-            print(f"[DEBUG] outputs.loss: {outputs.loss}")
-        else:
-            print("[DEBUG] outputs has NO 'loss' attribute!")
-        if hasattr(outputs, 'diff_loss'):
-            print(f"[DEBUG] outputs.diff_loss: {outputs.diff_loss}")
-        else:
-            print("[DEBUG] outputs has NO 'diff_loss' attribute!")
-        # ======================
-        
         return {'outputs': outputs}
     
     @torch.no_grad()

@@ -1,5 +1,7 @@
 """
 SOKE-style Collate Functions for Sign Language Datasets
+
+[FIXED] T2M task의 output 템플릿에 <Motion_Placeholder> 추가
 """
 
 import torch
@@ -10,6 +12,8 @@ from typing import List, Tuple, Any
 def sign_collate(batch: List[Tuple]) -> dict:
     """
     Collate function for sign language datasets.
+    
+    [FIXED] T2M task에서 output에 <Motion_Placeholder> 추가
     """
     # Filter out None items
     batch = [b for b in batch if b is not None]
@@ -36,12 +40,16 @@ def sign_collate(batch: List[Tuple]) -> dict:
             motion = torch.from_numpy(motion).float()
         motion_padded[i, :length] = motion[:length]
     
-    # Default tasks for LM training (t2m task)
+    # =========================================================================
+    # [FIXED] Default tasks for LM training (t2m task)
+    # output에 <Motion_Placeholder>를 추가해야 motion 토큰이 생성됨!
+    # =========================================================================
     tasks = [{
         'input': ['Generate motion: <Caption_Placeholder>'],
-        'output': [''],
-        'class': 't2m'  # ← 추가됨!
+        'output': ['<Motion_Placeholder>'],  # [FIXED] 빈 문자열 → Motion_Placeholder
+        'class': 't2m'
     }] * batch_size
+    # =========================================================================
     
     # Build output dict
     output = {
