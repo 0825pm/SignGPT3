@@ -41,14 +41,15 @@ from motGPT.utils.temos_utils import lengths_to_mask
 #   lhand: [30:75]            = 45 dims
 #   rhand: [75:120]           = 45 dims
 
+# 변경 (120-dim)
 PART_SLICES = {
-    'body':  [(0, 30), (120, 133)],  # upper_body + face (비연속)
-    'lhand': [(30, 75)],              # 연속
-    'rhand': [(75, 120)],             # 연속
+    'body':  [(0, 30)],     # upper_body only
+    'lhand': [(30, 75)],
+    'rhand': [(75, 120)],
 }
 
 PART_DIMS = {
-    'body':  43,   # 30 (upper_body) + 13 (face) = 43
+    'body':  30,   # upper_body only
     'lhand': 45,
     'rhand': 45,
 }
@@ -407,56 +408,21 @@ class MultiPartVae(nn.Module):
             self.dec_out_proj[part] = nn.Linear(latent_dim, PART_DIMS[part])
 
     def split_features(self, features: Tensor) -> Dict[str, Tensor]:
-        """
-        입력 features를 파트별로 분리
-        Args:
-            features: (B, T, 133)
-        Returns:
-            dict of (B, T, part_dim)
-        
-        SOKE 구조:
-          body:  [0:30] + [120:133] = 43 dims (비연속!)
-          lhand: [30:75] = 45 dims
-          rhand: [75:120] = 45 dims
-        """
         parts = {}
         
-        # body: upper_body + face (비연속 → concat)
-        upper_body = features[:, :, 0:30]      # (B, T, 30)
-        face = features[:, :, 120:133]         # (B, T, 13)
-        parts['body'] = torch.cat([upper_body, face], dim=-1)  # (B, T, 43)
-        
-        # lhand: 연속
-        parts['lhand'] = features[:, :, 30:75]   # (B, T, 45)
-        
-        # rhand: 연속
-        parts['rhand'] = features[:, :, 75:120]  # (B, T, 45)
+        # body: upper_body only (face 제거)
+        parts['body'] = features[:, :, 0:30]      # (B, T, 30)
+        parts['lhand'] = features[:, :, 30:75]    # (B, T, 45)
+        parts['rhand'] = features[:, :, 75:120]   # (B, T, 45)
         
         return parts
     
     def merge_features(self, parts: Dict[str, Tensor]) -> Tensor:
-        """
-        파트별 features를 합쳐서 전체 features 생성
-        Args:
-            parts: dict of (B, T, part_dim)
-        Returns:
-            features: (B, T, 133)
-        
-        body(43) → upper_body(30) + face(13)으로 분리 후 재배치
-        """
-        B, T, _ = parts['body'].shape
-        device = parts['body'].device
-        
-        # body에서 upper_body와 face 분리
-        upper_body = parts['body'][:, :, :30]   # (B, T, 30)
-        face = parts['body'][:, :, 30:]         # (B, T, 13)
-        
-        # 원래 순서대로 concat: upper_body + lhand + rhand + face
+        # 120-dim: upper_body + lhand + rhand
         features = torch.cat([
-            upper_body,           # [0:30]
+            parts['body'],        # [0:30]   upper_body
             parts['lhand'],       # [30:75]
             parts['rhand'],       # [75:120]
-            face,                 # [120:133]
         ], dim=-1)
         
         return features

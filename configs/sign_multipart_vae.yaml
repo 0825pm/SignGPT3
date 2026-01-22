@@ -58,7 +58,7 @@ TEST:
 DATASET:
   target: motGPT.data.H2S.H2SDataModule
   JOINT_TYPE: smplx
-  NFEATS: 133
+  NFEATS: 120
   NJOINTS: 55
   
   H2S:
