@@ -37,16 +37,7 @@ def feats2joints_sign(features, njoints=55):
 
 def feats2joints_smplx(features, mean, std):
     """
-    Convert 133-dim SOKE features to 3D joints using SMPL-X.
-    
-    Args:
-        features: [B, T, 133] or [T, 133] normalized features
-        mean: [133] mean for denormalization
-        std: [133] std for denormalization
-    
-    Returns:
-        vertices: [B, T, 10475, 3] SMPL-X vertices (or None)
-        joints: [B, T, 127, 3] SMPL-X joints
+    Convert 120/133-dim SOKE features to 3D joints using SMPL-X.
     """
     # Handle 2D input (T, D) -> (1, T, D)
     squeeze_output = False
@@ -68,27 +59,57 @@ def feats2joints_smplx(features, mean, std):
     std = std.to(features.device)
     features = features * std + mean
     
-    # Add zero lower body pose (36 dims: 3 root + 11 lower body joints * 3)
-    zero_pose = torch.zeros(B, T, 36, device=features.device, dtype=features.dtype)
-    
     # Default shape parameters
     shape_param = torch.tensor([[-0.07284723, 0.1795129, -0.27608207, 0.135155, 0.10748172, 
                                   0.16037364, -0.01616933, -0.03450319, 0.01369138, 0.01108842]],
                                device=features.device, dtype=features.dtype)
     shape_param = shape_param.unsqueeze(0).repeat(B, T, 1).view(B*T, -1)
     
-    # Concatenate: [zero_pose(36), features(133)] = 169 dims
-    features_full = torch.cat([zero_pose, features], dim=-1).view(B*T, -1)
+    # Parse features based on dimension
+    # features_flat = features.view(B*T, D)
+    features_flat = features.reshape(B*T, D)
+    
+    if D == 120:
+        # 120-dim: upper_body(30) + lhand(45) + rhand(45)
+        upper_body_pose = features_flat[:, 0:30]
+        lhand_pose = features_flat[:, 30:75]
+        rhand_pose = features_flat[:, 75:120]
+        
+        # Zeros for missing parts
+        lower_body_zeros = torch.zeros(B*T, 33, device=features.device, dtype=features.dtype)
+        body_pose = torch.cat([lower_body_zeros, upper_body_pose], dim=-1)  # [B*T, 63]
+        root_pose = torch.zeros(B*T, 3, device=features.device, dtype=features.dtype)
+        jaw_pose = torch.zeros(B*T, 3, device=features.device, dtype=features.dtype)
+        expr = torch.zeros(B*T, 10, device=features.device, dtype=features.dtype)
+        
+    elif D == 133:
+        # 133-dim: upper_body(30) + lhand(45) + rhand(45) + jaw(3) + expr(10)
+        upper_body_pose = features_flat[:, 0:30]
+        lhand_pose = features_flat[:, 30:75]
+        rhand_pose = features_flat[:, 75:120]
+        jaw_pose = features_flat[:, 120:123]
+        expr = features_flat[:, 123:133]
+        
+        lower_body_zeros = torch.zeros(B*T, 33, device=features.device, dtype=features.dtype)
+        body_pose = torch.cat([lower_body_zeros, upper_body_pose], dim=-1)
+        root_pose = torch.zeros(B*T, 3, device=features.device, dtype=features.dtype)
+        
+    else:
+        print(f"Warning: Unsupported feature dim {D}, returning zeros")
+        joints = torch.zeros(B, T, 55, 3, device=features.device, dtype=features.dtype)
+        if squeeze_output:
+            joints = joints.squeeze(0)
+        return None, joints
     
     try:
         vertices, joints = get_coord(
-            root_pose=features_full[..., 0:3],
-            body_pose=features_full[..., 3:66],
-            lhand_pose=features_full[..., 66:111],
-            rhand_pose=features_full[..., 111:156],
-            jaw_pose=features_full[..., 156:159],
+            root_pose=root_pose,
+            body_pose=body_pose,
+            lhand_pose=lhand_pose,
+            rhand_pose=rhand_pose,
+            jaw_pose=jaw_pose,
             shape=shape_param,
-            expr=features_full[..., 159:169]
+            expr=expr
         )
         
         # Reshape back to [B, T, ...]
@@ -143,13 +164,13 @@ class H2SDataModule(LightningDataModule):
         
         if mean_path and os.path.exists(mean_path):
             print(f"Loading mean from: {mean_path}")
-            self.mean = torch.load(mean_path)
+            self.mean = torch.load(mean_path)[:120]
         else:
             self.mean = torch.zeros(self.nfeats)
             
         if std_path and os.path.exists(std_path):
             print(f"Loading std from: {std_path}")
-            self.std = torch.load(std_path)
+            self.std = torch.load(std_path)[:120]
         else:
             self.std = torch.ones(self.nfeats)
         

@@ -169,7 +169,21 @@ class Feats2Joints(nn.Module):
         batch_size = B * T
         
         # ===== Parse SOKE 133-dim features (CORRECTED!) =====
-        if D == 133:
+        if D == 120:
+            upper_body_pose = features[:, 0:30]
+            lhand_pose = features[:, 30:75]
+            rhand_pose = features[:, 75:120]
+            
+            # 나머지는 전부 zeros
+            lower_body_zeros = torch.zeros(batch_size, 33, device=device, dtype=features.dtype)
+            body_pose = torch.cat([lower_body_zeros, upper_body_pose], dim=-1)  # [B, 63]
+            
+            root_pose = torch.zeros(batch_size, 3, device=device, dtype=features.dtype)
+            jaw_pose = torch.zeros(batch_size, 3, device=device, dtype=features.dtype)
+            expr = torch.zeros(batch_size, 10, device=device, dtype=features.dtype)
+            leye_pose = torch.zeros(batch_size, 3, device=device, dtype=features.dtype)
+            reye_pose = torch.zeros(batch_size, 3, device=device, dtype=features.dtype)
+        elif D == 133:
             # 133-dim structure: upper_body(30) + lhand(45) + rhand(45) + jaw(3) + expr(10)
             upper_body_pose = features[:, 0:30]      # 10 joints × 3
             lhand_pose = features[:, 30:75]          # 15 joints × 3
@@ -233,18 +247,32 @@ class Feats2Joints(nn.Module):
         device = features.device
         
         # Parse features and approximate joint positions
-        if D == 133:
+        if D == 120:
+            # Split 120-dim features: upper_body(30) + lhand(45) + rhand(45)
+            upper_body = features[..., 0:30].reshape(B, T, 10, 3)
+            lhand = features[..., 30:75].reshape(B, T, 15, 3)
+            rhand = features[..., 75:120].reshape(B, T, 15, 3)
+            
+            # Create approximate 55-joint skeleton
+            joints = torch.zeros(B, T, 55, 3, device=device, dtype=features.dtype)
+            
+            # Place upper body joints (joints 12-21)
+            joints[:, :, 12:22, :] = upper_body
+            
+            # Place hand joints
+            joints[:, :, 25:40, :] = lhand  # Left hand
+            joints[:, :, 40:55, :] = rhand  # Right hand
+            
+        elif D == 133:
             # Split SOKE 133-dim features (CORRECTED!)
             upper_body = features[..., 0:30].reshape(B, T, 10, 3)
             lhand = features[..., 30:75].reshape(B, T, 15, 3)
             rhand = features[..., 75:120].reshape(B, T, 15, 3)
             
             # Create approximate 55-joint skeleton
-            # 22 body + 15 lhand + 15 rhand + 3 (jaw, eyes) = 55
             joints = torch.zeros(B, T, 55, 3, device=device, dtype=features.dtype)
             
-            # Place upper body joints (approximate positions)
-            # Body joints 12-21 (10 joints) from upper_body
+            # Place upper body joints (joints 12-21)
             joints[:, :, 12:22, :] = upper_body
             
             # Place hand joints

@@ -36,19 +36,19 @@ SOKE_PART_INDICES: Dict[str, Tuple[int, int]] = {
     'upper_body': (0, 30),     # 30 dims = 10 upper body joints × 3
     'lhand':      (30, 75),    # 45 dims = 15 left hand joints × 3
     'rhand':      (75, 120),   # 45 dims = 15 right hand joints × 3
-    'jaw':        (120, 123),  # 3 dims = 1 jaw joint × 3
-    'expr':       (123, 133),  # 10 dims = facial expression
+    # 'jaw':        (120, 123),  # 3 dims = 1 jaw joint × 3
+    # 'expr':       (123, 133),  # 10 dims = facial expression
 }
 
 SOKE_PART_DIMS: Dict[str, int] = {
     'upper_body': 30,
     'lhand': 45,
     'rhand': 45,
-    'jaw': 3,
-    'expr': 10,
+    # 'jaw': 3,
+    # 'expr': 10,
 }
 
-SOKE_TOTAL_DIM = 133
+SOKE_TOTAL_DIM = 120
 
 # Aliases for compatibility
 SOKE_BODY_IDX = SOKE_PART_INDICES['upper_body']

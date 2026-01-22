@@ -63,11 +63,11 @@ DATASET:
   
   H2S:
     DATASET_NAME: how2sign_csl_phoenix
-    ROOT: /home/vscode/minkh/src/SOKE/data/How2Sign
-    CSL_ROOT: /home/vscode/minkh/src/SOKE/data/CSL-Daily
-    PHOENIX_ROOT: /home/vscode/minkh/src/SOKE/data/Phoenix_2014T
-    MEAN_PATH: /home/vscode/minkh/src/SOKE/data/CSL-Daily/mean.pt
-    STD_PATH: /home/vscode/minkh/src/SOKE/data/CSL-Daily/std.pt
+    ROOT: /home/user/Projects/research/SOKE/data/How2Sign
+    CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
+    PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
+    MEAN_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt
+    STD_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/std.pt
     FPS: 25
     MAX_MOTION_LEN: 300
     MIN_MOTION_LEN: 40

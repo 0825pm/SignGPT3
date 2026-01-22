@@ -62,7 +62,11 @@ class SignMotionDataset(Dataset):
         self.unit_length = unit_length
         self.max_motion_length = max_motion_length
         self.min_motion_length = min_motion_length
-        self.nfeats = 133
+        self.nfeats = 120  # 133 → 120
+        
+        # mean/std 슬라이싱 추가
+        self.mean = mean[:self.nfeats] if len(mean) > self.nfeats else mean
+        self.std = std[:self.nfeats] if len(std) > self.nfeats else std
         
         self.all_data = []
         self.h2s_len = 0

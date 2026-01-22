@@ -139,6 +139,18 @@ def convert_179_to_133(clip_poses):
     
     return clip_poses
 
+def convert_179_to_120(clip_poses):
+    """
+    179-dim → 120-dim 변환 (upper_body + lhand + rhand only)
+    
+    179-dim에서 직접 추출:
+    - [36:66]   upper_body (10 joints × 3 = 30)
+    - [66:111]  lhand (15 joints × 3 = 45)
+    - [111:156] rhand (15 joints × 3 = 45)
+    
+    Total: 30 + 45 + 45 = 120
+    """
+    return clip_poses[:, 36:156]
 
 def load_h2s_sample(ann, data_dir, need_pose=True, code_path=None, need_code=False):
     """
@@ -230,7 +242,7 @@ def load_h2s_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
                 continue
         
         # 179 -> 133 변환
-        clip_poses = convert_179_to_133(clip_poses)
+        clip_poses = convert_179_to_120(clip_poses)
     else:
         clip_poses = np.zeros([len(pkl_files), 133], dtype=np.float32)
     
@@ -280,9 +292,9 @@ def load_csl_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
                 continue
         
         # 179 -> 133 변환
-        clip_poses = convert_179_to_133(clip_poses)
+        clip_poses = convert_179_to_120(clip_poses)
     else:
-        clip_poses = np.zeros([len(frame_list), 133], dtype=np.float32)
+        clip_poses = np.zeros([len(frame_list), 120], dtype=np.float32)
     
     # Code 로딩
     code = None
@@ -330,9 +342,9 @@ def load_phoenix_sample(ann, data_dir, need_pose=True, code_path=None, need_code
                 continue
         
         # 179 -> 133 변환
-        clip_poses = convert_179_to_133(clip_poses)
+        clip_poses = convert_179_to_120(clip_poses)
     else:
-        clip_poses = np.zeros([len(frame_list), 133], dtype=np.float32)
+        clip_poses = np.zeros([len(frame_list), 120], dtype=np.float32)
     
     # Code 로딩
     code = None
@@ -412,9 +424,9 @@ def load_iso_sample(ann, data_dir, need_pose=True, code_path=None, need_code=Fal
                 continue
         
         # 179 -> 133 변환
-        clip_poses = convert_179_to_133(clip_poses)
+        clip_poses = convert_179_to_120(clip_poses)
     else:
-        clip_poses = np.zeros([len(frame_list), 133], dtype=np.float32)
+        clip_poses = np.zeros([len(frame_list), 120], dtype=np.float32)
     
     # Code 로딩
     code = None
