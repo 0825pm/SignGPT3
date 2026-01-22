@@ -1,7 +1,6 @@
 """
-SOKE-style Motion Reconstruction Metrics (Fast Version)
-Computes MPJPE and MPJPE_PA for sign language VAE evaluation
-No DTW - for VAE where input/output lengths are equal
+Motion Reconstruction Metrics for Sign Language (SOKE-compatible)
+SignGPT3/motGPT/metrics/mr.py 로 복사하세요.
 """
 from typing import List
 from collections import defaultdict
@@ -14,350 +13,293 @@ from torchmetrics import Metric
 
 
 def rigid_align_batch(source, target):
-    """
-    Procrustes alignment: align source to target using SVD (batched).
-    
-    Args:
-        source: (T, N, 3) source points
-        target: (T, N, 3) target points
-    
-    Returns:
-        aligned: (T, N, 3) aligned source points
-    """
+    """Procrustes alignment"""
+    if isinstance(source, torch.Tensor):
+        source = source.detach().cpu().numpy()
+    if isinstance(target, torch.Tensor):
+        target = target.detach().cpu().numpy()
+        
     T, N, _ = source.shape
     aligned = np.zeros_like(source)
     
     for t in range(T):
-        src = source[t]  # (N, 3)
-        tgt = target[t]  # (N, 3)
+        src = source[t]
+        tgt = target[t]
         
-        # Center the points
         mu_src = src.mean(axis=0, keepdims=True)
         mu_tgt = tgt.mean(axis=0, keepdims=True)
         
         src_centered = src - mu_src
         tgt_centered = tgt - mu_tgt
         
-        # Compute optimal rotation using SVD
         H = src_centered.T @ tgt_centered
         U, S, Vt = np.linalg.svd(H)
-        
         R = Vt.T @ U.T
         
-        # Handle reflection
         if np.linalg.det(R) < 0:
             Vt[-1, :] *= -1
             R = Vt.T @ U.T
         
-        # Compute scale
         var_src = (src_centered ** 2).sum()
         scale = S.sum() / max(var_src, 1e-8)
         
-        # Apply transformation
         aligned[t] = scale * (src_centered @ R.T) + mu_tgt
     
     return aligned
 
 
+def rigid_align_torch_batch(source, target):
+    """Torch version of rigid alignment"""
+    source_np = source.detach().cpu().numpy() if isinstance(source, torch.Tensor) else source
+    target_np = target.detach().cpu().numpy() if isinstance(target, torch.Tensor) else target
+    aligned = rigid_align_batch(source_np, target_np)
+    return torch.from_numpy(aligned).to(source.device) if isinstance(source, torch.Tensor) else aligned
+
+
 class MRMetrics(Metric):
     """
-    Motion Reconstruction Metrics for Sign Language (SOKE-style)
-    
-    Computes per-dataset (how2sign, csl, phoenix) metrics:
-    - MPJPE: Root/Wrist-aligned (translation only)
-    - MPJPE_PA: Procrustes aligned (translation + rotation + scale)
-    
-    For body parts: body, lhand, rhand, hand
+    Motion Reconstruction Metrics for Sign Language
+    Compatible with motgpt.py calling conventions
     """
 
     def __init__(self,
                  njoints=55,
-                 num_joints=55,
                  jointstype: str = "smplx",
                  force_in_meter: bool = True,
+                 align_root: bool = True,
                  dist_sync_on_step=True,
                  **kwargs):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
 
         self.name = 'Motion Reconstructions'
         self.jointstype = jointstype
-        self.njoints = njoints if njoints else num_joints
-        self.force_in_meter = force_in_meter  # multiply by 1000 for mm
-        
-        # Dataset sources
-        self.sources = ['how2sign', 'csl', 'phoenix']
-        
-        # SMPL-X joint indices (55 joints)
-        self.joint_part2idx = {
-            'body': list(range(0, 22)),        # Body joints
-            'lhand': list(range(25, 40)),      # Left hand (15 joints)
-            'rhand': list(range(40, 55)),      # Right hand (15 joints)
-        }
-        
-        # Alignment indices
-        self.pelvis_idx = 0      # Pelvis for body
-        self.lwrist_idx = 20     # Left wrist
-        self.rwrist_idx = 21     # Right wrist
-        
-        # Feature part indices (133-dim SOKE format)
+        self.align_root = align_root
+        self.force_in_meter = force_in_meter
+        self.njoints = njoints
+
+        # SOKE 133-dim Feature Part Indices
         self.smplx_part2idx = {
-            'body': list(range(9, 72)),          # 21 body joints * 3
-            'lhand': list(range(72, 117)),       # 15 left hand joints * 3  
-            'rhand': list(range(117, 133)),      # partial right hand
-            'hand': list(range(72, 133)),        # both hands
+            'upper_body': list(range(30)), 
+            'lhand': list(range(30, 75)), 
+            'rhand': list(range(75, 120)), 
+            'hand': list(range(30, 120)), 
+            'face': list(range(120, 133))
         }
         
-        # Initialize states for each source and metric
+        # Joint part indices (55 joints)
+        self.joint_part2idx = {
+            'body': list(range(0, 22)),
+            'lhand': list(range(25, 40)),
+            'rhand': list(range(40, 55)),
+        }
+        
+        self.name2scores = defaultdict(dict)
+        self.sources = ['how2sign', 'csl', 'phoenix']
+
+        # Initialize all states for each source
         for src in self.sources:
             self.add_state(f"{src}_count", default=torch.tensor(0), dist_reduce_fx="sum")
             self.add_state(f"{src}_count_seq", default=torch.tensor(0), dist_reduce_fx="sum")
+
+            # MPVPE metrics (vertex-based)
+            self.add_state(f"{src}_MPVPE_PA_all", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPVPE_PA_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPVPE_PA_face", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPVPE_all", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPVPE_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPVPE_face", default=torch.tensor([0.0]), dist_reduce_fx="sum")
             
-            # MPJPE metrics (root/wrist aligned - translation only)
-            for part in ['body', 'lhand', 'rhand', 'hand']:
-                self.add_state(f"{src}_MPJPE_{part}", 
-                              default=torch.tensor(0.0), dist_reduce_fx="sum")
-            
-            # MPJPE_PA metrics (Procrustes aligned)
-            for part in ['body', 'lhand', 'rhand', 'hand']:
-                self.add_state(f"{src}_MPJPE_PA_{part}", 
-                              default=torch.tensor(0.0), dist_reduce_fx="sum")
-            
-            # Feature error
-            self.add_state(f"{src}_feat_error", default=torch.tensor(0.0), dist_reduce_fx="sum")
-            self.add_state(f"{src}_feat_error_hand", default=torch.tensor(0.0), dist_reduce_fx="sum")
+            # MPJPE metrics (joint-based)
+            self.add_state(f"{src}_MPJPE_PA_body", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPJPE_PA_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPJPE_body", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_MPJPE_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+
+            # Feature error metrics
+            self.add_state(f"{src}_feat_error", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+            self.add_state(f"{src}_feat_error_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
+
+        # Metric names - feat_error 포함
+        m = ["MPVPE_PA_all", "MPVPE_PA_hand", "MPVPE_PA_face",
+             "MPJPE_PA_body", "MPJPE_PA_hand", "MPJPE_body", "MPJPE_hand",
+             "MPVPE_all", "MPVPE_hand", "MPVPE_face",
+             "feat_error", "feat_error_hand"]
+        self.MR_metrics = []
+        for d in self.sources:
+            for m_ in m:
+                self.MR_metrics.append(f'{d}_{m_}')
+
+        self.metrics = self.MR_metrics
 
     def _compute_mpjpe(self, joints_rst, joints_ref, part='body', use_pa=False):
-        """
-        Compute MPJPE for a specific body part.
+        """Compute MPJPE for a body part"""
+        if part == 'hand':
+            part_idx = self.joint_part2idx['lhand'] + self.joint_part2idx['rhand']
+        else:
+            part_idx = self.joint_part2idx.get(part, self.joint_part2idx['body'])
         
-        Args:
-            joints_rst: (T, N, 3) reconstructed joints
-            joints_ref: (T, N, 3) reference joints
-            part: body part name ('body', 'lhand', 'rhand')
-            use_pa: if True, use Procrustes alignment (MPJPE_PA)
-                    if False, use wrist/root alignment (MPJPE)
+        max_joint = joints_rst.shape[1]
+        part_idx = [i for i in part_idx if i < max_joint]
         
-        Returns:
-            mpjpe: MPJPE in mm
-        """
-        # Get joint indices for this part
-        if part not in self.joint_part2idx:
+        if len(part_idx) == 0:
             return 0.0
         
-        joint_idx = self.joint_part2idx[part]
+        rst = joints_rst[:, part_idx, :]
+        ref = joints_ref[:, part_idx, :]
         
-        # Check if indices are valid
-        if max(joint_idx) >= joints_rst.shape[1]:
-            return 0.0
-        
-        # Extract part joints
-        j_rst = joints_rst[:, joint_idx, :]  # (T, num_joints, 3)
-        j_ref = joints_ref[:, joint_idx, :]
+        rst = rst - rst[:, [0], :]
+        ref = ref - ref[:, [0], :]
         
         if use_pa:
-            # Procrustes alignment (per frame)
-            j_rst = rigid_align_batch(j_rst, j_ref)
+            rst = rigid_align_batch(rst, ref)
+            if isinstance(rst, torch.Tensor):
+                rst = rst.numpy()
+            if isinstance(ref, torch.Tensor):
+                ref = ref.numpy()
         else:
-            # Translation alignment (wrist for hands, pelvis for body)
-            if part == 'lhand':
-                # Align by first joint of hand (wrist-relative)
-                align_idx = 0
-            elif part == 'rhand':
-                align_idx = 0
-            else:  # body
-                align_idx = 0  # pelvis
-            
-            # Subtract alignment joint
-            j_rst = j_rst - j_rst[:, align_idx:align_idx+1, :] + j_ref[:, align_idx:align_idx+1, :]
+            if isinstance(rst, torch.Tensor):
+                rst = rst.numpy()
+            if isinstance(ref, torch.Tensor):
+                ref = ref.numpy()
         
-        # Compute MPJPE
-        diff = j_rst - j_ref
-        dist = np.sqrt((diff ** 2).sum(axis=-1))  # (T, num_joints)
-        mpjpe = dist.mean()
-        
-        # Convert to mm
-        if self.force_in_meter:
-            mpjpe = mpjpe * 1000.0
-        
-        return mpjpe
+        error = np.sqrt(((rst - ref) ** 2).sum(axis=-1))
+        return error.mean()
 
-    @torch.no_grad()
-    def update(self,
-               feats_rst: Tensor = None,
-               feats_ref: Tensor = None,
-               joints_rst: Tensor = None,
+    def compute(self, sanity_flag=False):
+        """Compute final metrics - 모든 메트릭 항상 반환"""
+        if self.force_in_meter:
+            factor = 1000.0
+        else:
+            factor = 1.0
+
+        mr_metrics = {}
+
+        # 모든 메트릭을 항상 반환 (없으면 0)
+        for name in self.MR_metrics:
+            d = name.split('_')[0]
+            count = getattr(self, f'{d}_count')
+            value = getattr(self, name)
+            
+            # count가 0이면 0 반환
+            if count == 0:
+                mr_metrics[name] = torch.tensor([0.0])
+            else:
+                mr_metrics[name] = value / count
+                if 'MPVPE' in name or 'MPJPE' in name:
+                    mr_metrics[name] = mr_metrics[name] * factor
+
+        if not sanity_flag:
+            print("\n" + "=" * 50)
+            print("=== MRMetrics Results ===")
+            for name, v in mr_metrics.items():
+                val = v.item() if isinstance(v, torch.Tensor) else v
+                if val > 0:
+                    print(f"  {name}: {val:.4f}")
+            print("=" * 50)
+        
+        self.reset()
+        return mr_metrics
+
+    def update(self, 
+               feats_rst: Tensor, 
+               feats_ref: Tensor,
+               joints_rst: Tensor = None, 
                joints_ref: Tensor = None,
-               vertices_rst: Tensor = None,
+               vertices_rst: Tensor = None, 
                vertices_ref: Tensor = None,
-               lengths: List[int] = None,
-               src: List[str] = None,
+               lengths: List[int] = None, 
+               src: List[str] = None, 
                name: List[str] = None,
                **kwargs):
-        """
-        Update metrics with batch data.
-        """
+        """Update metrics"""
         if lengths is None:
-            return
-        
+            lengths = [feats_rst.shape[1]] * feats_rst.shape[0]
+        if src is None:
+            src = ['how2sign'] * len(lengths)
+        if name is None:
+            name = [f'sample_{i}' for i in range(len(lengths))]
+            
         B = len(lengths)
         
-        # Default source
-        if src is None:
-            src = ['how2sign'] * B
-        
-        # ===== Feature-based metrics =====
-        if feats_rst is not None and feats_ref is not None:
-            feats_rst = feats_rst.detach().cpu()
-            feats_ref = feats_ref.detach().cpu()
-            
-            for i in range(B):
-                cur_len = lengths[i]
-                data_src = src[i]
-                
-                # Feature error
-                feat_rst = feats_rst[i, :cur_len]
-                feat_ref = feats_ref[i, :cur_len]
-                
-                feat_mse = torch.sqrt(((feat_rst - feat_ref) ** 2).mean()).item()
-                setattr(self, f'{data_src}_feat_error',
-                       getattr(self, f'{data_src}_feat_error') + feat_mse * cur_len)
-                
-                # Hand feature error
-                hand_idx = self.smplx_part2idx.get('hand', list(range(72, 133)))
-                max_idx = max(hand_idx) + 1 if hand_idx else 133
-                if feat_rst.shape[-1] >= max_idx:
-                    feat_rst_hand = feat_rst[..., hand_idx]
-                    feat_ref_hand = feat_ref[..., hand_idx]
-                    hand_mse = torch.sqrt(((feat_rst_hand - feat_ref_hand) ** 2).mean()).item()
-                    setattr(self, f'{data_src}_feat_error_hand',
-                           getattr(self, f'{data_src}_feat_error_hand') + hand_mse * cur_len)
-                
-                # Update counts
-                setattr(self, f'{data_src}_count',
-                       getattr(self, f'{data_src}_count') + cur_len)
-                setattr(self, f'{data_src}_count_seq',
-                       getattr(self, f'{data_src}_count_seq') + 1)
-        
-        # ===== Joint-based MPJPE metrics =====
+        # Reshape joints if needed
         if joints_rst is not None and joints_ref is not None:
-            # Convert to numpy
-            if isinstance(joints_rst, torch.Tensor):
-                joints_rst = joints_rst.detach().cpu().numpy()
-            if isinstance(joints_ref, torch.Tensor):
-                joints_ref = joints_ref.detach().cpu().numpy()
-            
-            # Handle different input shapes
-            if joints_rst.ndim == 4:
-                # Already (B, T, N, 3)
-                pass
-            elif joints_rst.ndim == 3:
-                # (BT, N, 3) -> (B, T, N, 3)
+            if joints_rst.dim() == 3:
                 BT, N, _ = joints_rst.shape
                 T = BT // B
                 joints_rst = joints_rst.reshape(B, T, N, 3)
                 joints_ref = joints_ref.reshape(B, T, N, 3)
-            else:
-                print(f"[MRMetrics] Unexpected joints shape: {joints_rst.shape}")
-                return
+            joints_rst = joints_rst.detach().cpu()
+            joints_ref = joints_ref.detach().cpu()
+        
+        # Reshape vertices if needed
+        if vertices_rst is not None and vertices_ref is not None:
+            if vertices_rst.dim() == 3:
+                BT, N, _ = vertices_rst.shape
+                T = BT // B
+                vertices_rst = vertices_rst.reshape(B, T, N, 3)
+                vertices_ref = vertices_ref.reshape(B, T, N, 3)
+            vertices_rst = vertices_rst.detach().cpu()
+            vertices_ref = vertices_ref.detach().cpu()
+        
+        for i in range(B):
+            cur_len = lengths[i]
+            data_src = src[i] if isinstance(src, list) else src
+            cur_name = name[i] if isinstance(name, list) else name
             
-            for i in range(B):
-                cur_len = lengths[i]
-                data_src = src[i]
+            # Update count
+            setattr(self, f'{data_src}_count', cur_len + getattr(self, f'{data_src}_count'))
+            setattr(self, f'{data_src}_count_seq', 1 + getattr(self, f'{data_src}_count_seq'))
+            
+            # ===== Feature error metrics =====
+            if feats_rst is not None and feats_ref is not None:
+                f_rst = feats_rst[i, :cur_len]
+                f_ref = feats_ref[i, :cur_len]
                 
-                j_rst = joints_rst[i, :cur_len]  # (T, N, 3)
-                j_ref = joints_ref[i, :cur_len]  # (T, N, 3)
+                feat_error = torch.abs(f_rst - f_ref).mean() * cur_len
+                setattr(self, f'{data_src}_feat_error', getattr(self, f'{data_src}_feat_error') + feat_error)
                 
-                # Update count if not done in feature section
-                if feats_rst is None:
-                    setattr(self, f'{data_src}_count',
-                           getattr(self, f'{data_src}_count') + cur_len)
-                    setattr(self, f'{data_src}_count_seq',
-                           getattr(self, f'{data_src}_count_seq') + 1)
+                hand_idx = self.smplx_part2idx['hand']
+                feat_error_hand = torch.abs(f_rst[:, hand_idx] - f_ref[:, hand_idx]).mean() * cur_len
+                setattr(self, f'{data_src}_feat_error_hand', getattr(self, f'{data_src}_feat_error_hand') + feat_error_hand)
+            
+            # ===== Vertex-based metrics (MPVPE) =====
+            if vertices_rst is not None and vertices_ref is not None:
+                mesh_gt = vertices_ref[i, :cur_len]
+                mesh_out = vertices_rst[i, :cur_len]
                 
-                # Compute MPJPE and MPJPE_PA for each part
-                for part in ['body', 'lhand', 'rhand']:
-                    # MPJPE (wrist/root aligned)
-                    mpjpe = self._compute_mpjpe(j_rst, j_ref, part=part, use_pa=False)
-                    attr = f'{data_src}_MPJPE_{part}'
-                    setattr(self, attr, getattr(self, attr) + mpjpe * cur_len)
+                mesh_out_align = rigid_align_torch_batch(mesh_out, mesh_gt)
+                if isinstance(mesh_out_align, np.ndarray):
+                    mesh_out_align = torch.from_numpy(mesh_out_align)
+                if isinstance(mesh_gt, np.ndarray):
+                    mesh_gt = torch.from_numpy(mesh_gt)
                     
-                    # MPJPE_PA (Procrustes aligned)
-                    mpjpe_pa = self._compute_mpjpe(j_rst, j_ref, part=part, use_pa=True)
-                    attr_pa = f'{data_src}_MPJPE_PA_{part}'
-                    setattr(self, attr_pa, getattr(self, attr_pa) + mpjpe_pa * cur_len)
+                value = torch.mean(torch.sqrt(torch.sum((mesh_out_align - mesh_gt) ** 2, dim=-1)), dim=-1).sum()
+                setattr(self, f"{data_src}_MPVPE_PA_all", getattr(self, f"{data_src}_MPVPE_PA_all") + value)
                 
-                # Combined hand metrics (average of lhand and rhand)
-                lhand_mpjpe = self._compute_mpjpe(j_rst, j_ref, part='lhand', use_pa=False)
-                rhand_mpjpe = self._compute_mpjpe(j_rst, j_ref, part='rhand', use_pa=False)
-                hand_mpjpe = (lhand_mpjpe + rhand_mpjpe) / 2
-                setattr(self, f'{data_src}_MPJPE_hand',
-                       getattr(self, f'{data_src}_MPJPE_hand') + hand_mpjpe * cur_len)
+                if isinstance(mesh_out, np.ndarray):
+                    mesh_out = torch.from_numpy(mesh_out)
+                value = torch.mean(torch.sqrt(torch.sum((mesh_out - mesh_gt) ** 2, dim=-1)), dim=-1).sum()
+                setattr(self, f"{data_src}_MPVPE_all", getattr(self, f"{data_src}_MPVPE_all") + value)
+            
+            # ===== Joint-based metrics (MPJPE) =====
+            if joints_rst is not None and joints_ref is not None:
+                j_rst = joints_rst[i, :cur_len].numpy() if isinstance(joints_rst, torch.Tensor) else joints_rst[i, :cur_len]
+                j_ref = joints_ref[i, :cur_len].numpy() if isinstance(joints_ref, torch.Tensor) else joints_ref[i, :cur_len]
                 
-                lhand_pa = self._compute_mpjpe(j_rst, j_ref, part='lhand', use_pa=True)
-                rhand_pa = self._compute_mpjpe(j_rst, j_ref, part='rhand', use_pa=True)
-                hand_pa = (lhand_pa + rhand_pa) / 2
-                setattr(self, f'{data_src}_MPJPE_PA_hand',
-                       getattr(self, f'{data_src}_MPJPE_PA_hand') + hand_pa * cur_len)
+                mpjpe_body = self._compute_mpjpe(j_rst, j_ref, part='body', use_pa=False)
+                setattr(self, f'{data_src}_MPJPE_body', getattr(self, f'{data_src}_MPJPE_body') + mpjpe_body * cur_len)
+                
+                mpjpe_pa_body = self._compute_mpjpe(j_rst, j_ref, part='body', use_pa=True)
+                setattr(self, f'{data_src}_MPJPE_PA_body', getattr(self, f'{data_src}_MPJPE_PA_body') + mpjpe_pa_body * cur_len)
+                
+                mpjpe_lhand = self._compute_mpjpe(j_rst, j_ref, part='lhand', use_pa=False)
+                mpjpe_rhand = self._compute_mpjpe(j_rst, j_ref, part='rhand', use_pa=False)
+                mpjpe_hand = (mpjpe_lhand + mpjpe_rhand) / 2
+                setattr(self, f'{data_src}_MPJPE_hand', getattr(self, f'{data_src}_MPJPE_hand') + mpjpe_hand * cur_len)
+                
+                mpjpe_pa_lhand = self._compute_mpjpe(j_rst, j_ref, part='lhand', use_pa=True)
+                mpjpe_pa_rhand = self._compute_mpjpe(j_rst, j_ref, part='rhand', use_pa=True)
+                mpjpe_pa_hand = (mpjpe_pa_lhand + mpjpe_pa_rhand) / 2
+                setattr(self, f'{data_src}_MPJPE_PA_hand', getattr(self, f'{data_src}_MPJPE_PA_hand') + mpjpe_pa_hand * cur_len)
         
-        # Cleanup
         gc.collect()
-
-    def compute(self, sanity_flag=False):
-        """
-        Compute final metrics.
-        Returns 0 for sources with no data (instead of skipping).
-        """
-        metrics = {}
-        
-        for src in self.sources:
-            count = getattr(self, f'{src}_count')
-            count_seq = getattr(self, f'{src}_count_seq')
-            count_val = count.item() if isinstance(count, torch.Tensor) else count
-            
-            # ========== 핵심 수정: 데이터 없으면 0 반환 ==========
-            if count_seq == 0:
-                # No data for this source - return 0 for all metrics
-                metrics[f'{src}_feat_error'] = torch.tensor(0.0)
-                metrics[f'{src}_feat_error_hand'] = torch.tensor(0.0)
-                for part in ['body', 'lhand', 'rhand', 'hand']:
-                    metrics[f'{src}_MPJPE_{part}'] = torch.tensor(0.0)
-                    metrics[f'{src}_MPJPE_PA_{part}'] = torch.tensor(0.0)
-                continue
-            # ====================================================
-            
-            # Feature errors
-            feat_error = getattr(self, f'{src}_feat_error') / max(count_val, 1)
-            feat_error_hand = getattr(self, f'{src}_feat_error_hand') / max(count_val, 1)
-            metrics[f'{src}_feat_error'] = feat_error
-            metrics[f'{src}_feat_error_hand'] = feat_error_hand
-            
-            # MPJPE metrics
-            for part in ['body', 'lhand', 'rhand', 'hand']:
-                # MPJPE
-                mpjpe = getattr(self, f'{src}_MPJPE_{part}') / max(count_val, 1)
-                metrics[f'{src}_MPJPE_{part}'] = mpjpe
-                
-                # MPJPE_PA
-                mpjpe_pa = getattr(self, f'{src}_MPJPE_PA_{part}') / max(count_val, 1)
-                metrics[f'{src}_MPJPE_PA_{part}'] = mpjpe_pa
-        
-        # Print summary
-        if not sanity_flag:
-            print("\n" + "=" * 50)
-            print("=== MRMetrics Results ===")
-            print("=" * 50)
-            for src in self.sources:
-                count_seq = getattr(self, f'{src}_count_seq')
-                if count_seq > 0:
-                    print(f"\n[{src}] ({count_seq} sequences)")
-                    for name in sorted([k for k in metrics.keys() if k.startswith(src)]):
-                        value = metrics[name]
-                        if isinstance(value, torch.Tensor):
-                            value = value.item()
-                        print(f"  {name}: {value:.4f}")
-                else:
-                    print(f"\n[{src}] No data (all metrics = 0)")
-            print("=" * 50 + "\n")
-        
-        self.reset()
-        return metrics
