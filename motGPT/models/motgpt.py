@@ -446,3 +446,65 @@ class MotGPT(BaseModel):
             return [optimizer], [scheduler]
         
         return optimizer
+    
+    def train_lm_forward_modified(self, batch):
+        """
+        LM Training forward with cached text embedding support
+        
+        기존 코드에서 수정된 부분:
+        - batch['text_emb'], batch['text_mask'] 추출
+        - self.lm() 호출 시 text_emb, text_mask 전달
+        """
+        # 기존 코드
+        feats_ref = batch["motion"]
+        texts = batch["text"]
+        lengths = batch["length"]
+        tasks = batch.get("tasks", None)
+        
+        # ★★★ 추가: Cached text embedding ★★★
+        text_emb = batch.get('text_emb', None)   # [B, seq, 768] or None
+        text_mask = batch.get('text_mask', None)  # [B, seq] or None
+        
+        # LLM Forward with cached embedding
+        outputs = self.lm(
+            texts, 
+            feats_ref, 
+            self.vae.encode_dist,  # motion_encode_net
+            lengths, 
+            tasks,
+            text_emb=text_emb,      # ★ 추가
+            text_mask=text_mask,    # ★ 추가
+        )
+        
+        return {'outputs': outputs}
+
+
+    # ============================================================================
+    # 또는 더 간단하게: monkey patch 방식
+    # ============================================================================
+    # train.py 상단에 추가하면 됨:
+
+    def patch_motgpt_for_cached_emb():
+        """Monkey patch MotGPT to support cached text embeddings"""
+        from motGPT.models.motgpt import MotGPT
+        
+        original_train_lm_forward = MotGPT.train_lm_forward
+        
+        def new_train_lm_forward(self, batch):
+            feats_ref = batch["motion"]
+            texts = batch["text"]
+            lengths = batch["length"]
+            tasks = batch.get("tasks", None)
+            
+            # ★ Cached embedding
+            text_emb = batch.get('text_emb', None)
+            text_mask = batch.get('text_mask', None)
+            
+            outputs = self.lm(
+                texts, feats_ref, self.vae.encode_dist, lengths, tasks,
+                text_emb=text_emb, text_mask=text_mask,
+            )
+            return {'outputs': outputs}
+        
+        MotGPT.train_lm_forward = new_train_lm_forward
+        print("[Patch] MotGPT.train_lm_forward patched for cached text embeddings")

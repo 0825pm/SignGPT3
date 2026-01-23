@@ -19,5 +19,6 @@ README0.md
 test_folder.py
 ig-*.py
 checkpoints/
+data/
 *.ckpt
 *.mp4

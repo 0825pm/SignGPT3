@@ -1,0 +1,222 @@
+# SignGPT3 mBART Hybrid LM Training Config
+# mBART Encoder (multilingual) + Motion Branch + Diffusion Head
+#
+# 복사 위치: configs/sign_lm_mbart_hybrid.yaml
+# 실행: python train.py --cfg configs/sign_lm_mbart_hybrid.yaml --nodebug
+
+NAME: SignGPT3_lm_mbart_hybrid
+ACCELERATOR: 'gpu'
+NUM_NODES: 1
+DEVICE: [0]
+
+# =============================================================================
+# LM Ablation Settings
+# =============================================================================
+lm_ablation:
+  motion_holder_repeat: 4
+  holder_num_in_input: 4
+  motion_holder_seq_mode: 'withse'
+  with_hid_norm: False
+  with_vae_latent_norm: True
+  multi_hidden: True
+  guidance_scale: 3.0
+  model_guidance_scale: 3.0
+  diffusion_batch_mul: 4
+  guidance_uncondp: 0.1
+  predict_epsilon: True
+  fake_latent_mode: 'learnable_zero'
+  instruction_type: t2m
+  mot_factor: 1.0
+  attention_mode: 'all'
+  
+ABLATION:
+  SKIP_CONNECT: True
+  PE_TYPE: mld
+  DIFF_PE_TYPE: mld
+  VAE_TYPE: mld
+  VAE_ARCH: encoder_decoder
+  MLP_DIST: False
+  IS_DIST: False
+  PREDICT_EPSILON: True
+
+# =============================================================================
+# Training
+# =============================================================================
+TRAIN:
+  STAGE: lm_pretrain
+  instruction_type: t2m
+  NUM_WORKERS: 8
+  BATCH_SIZE: 512
+  END_EPOCH: 300
+  # VAE checkpoint path (수정 필요)
+  PRETRAINED_VAE: /home/user/Projects/research/MotionGPT3/experiments/motgpt/SignGPT3_vae_mld/checkpoints/last.ckpt
+
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 1000
+      eta_min: 1e-6
+
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+    params_diff:
+      lr: 2e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+
+EVAL:
+  BATCH_SIZE: 32
+  SPLIT: val
+
+TEST:
+  CHECKPOINTS: ''
+  SPLIT: test
+  BATCH_SIZE: 32
+  REPLICATION_TIMES: 2
+
+# =============================================================================
+# Dataset - 3개 데이터셋 모두 사용 (다국어)
+# =============================================================================
+DATASET:
+  target: motGPT.data.H2S_cached.H2SDataModuleCached
+  NFEATS: 120
+  CODE_PATH: TOKENS
+  NJOINTS: 55        # ★ 추가
+  JOINT_TYPE: smplx
+  H2S:
+    DATASET_NAME: how2sign_csl_phoenix  # 3개 모두!
+    ROOT: /home/user/Projects/research/SOKE/data/How2Sign
+    CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
+    PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
+    MEAN_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt
+    STD_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/std.pt
+    TEXT_EMB_DIR: ./data/text_embeddings  # ★ Cached text embeddings
+    UNIT_LEN: 4
+    FPS: 25
+    MAX_MOTION_LEN: 300
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 40
+    PICK_ONE_TEXT: true
+
+# =============================================================================
+# Model
+# =============================================================================
+model:
+  target: motGPT.models.motgpt.MotGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.mbart_hybrid}
+    motion_vae: ${vae.mldvae}
+    stage: ${TRAIN.STAGE}
+    debug: ${DEBUG}
+    codebook_size: 512
+    guidance_scale: ${lm_ablation.guidance_scale}
+
+  # Diffusion loss config
+  diff_loss:
+    target: motGPT.diffusion.diffloss.DiffLoss
+    params:
+      width: 1024
+      depth: 3
+      multi_hidden: ${lm_ablation.multi_hidden}
+      num_sampling_steps: '100'
+      noise_schedule: 'scaled_linear'
+      learn_sigma: False
+      sigma_small: True
+      grad_checkpointing: False
+
+# =============================================================================
+# mBART Hybrid LM Config
+# =============================================================================
+lm:
+  mbart_hybrid:
+    target: motGPT.archs.mbart_hybrid_lm.MBartHybridLM
+    params:
+      model_type: mbart_hybrid
+      model_path: ./deps/mbart-h2s-csl-phoenix  # SOKE pretrained mBART
+      stage: ${TRAIN.STAGE}
+      freeze_encoder: true  # Stage 1에서 frozen
+      
+      # Motion Branch settings
+      motion_branch_layers: 6
+      motion_branch_heads: 8
+      
+      # Diffusion Head
+      diffhead: ${model.diff_loss}
+      
+      # Compatible params
+      motion_codebook_size: ${model.params.codebook_size}
+      mot_factor: ${lm_ablation.mot_factor}
+      attention_mode: ${lm_ablation.attention_mode}
+      ablation: ${ABLATION}
+      diffusion_batch_mul: ${lm_ablation.diffusion_batch_mul}
+      guidance_uncondp: ${lm_ablation.guidance_uncondp}
+      predict_epsilon: ${lm_ablation.predict_epsilon}
+      guidance_scale: ${lm_ablation.guidance_scale}
+      fake_latent_mode: ${lm_ablation.fake_latent_mode}
+      motion_holder_repeat: ${lm_ablation.motion_holder_repeat}
+      holder_num_in_input: ${lm_ablation.holder_num_in_input}
+      motion_holder_seq_mode: ${lm_ablation.motion_holder_seq_mode}
+      with_hid_norm: ${lm_ablation.with_hid_norm}
+      with_vae_latent_norm: ${lm_ablation.with_vae_latent_norm}
+
+# =============================================================================
+# VAE Config (기존 SignGPT3 VAE)
+# =============================================================================
+vae:
+  mldvae:
+    target: motGPT.archs.mld_vae.MldVae
+    params:
+      arch: 'encoder_decoder'
+      ff_size: 1024
+      num_layers: 9
+      num_heads: 4
+      dropout: 0.1
+      normalize_before: false
+      activation: 'gelu'
+      position_embedding: 'learned'
+      latent_dim: [1, 256]
+      code_num: 512
+      ablation: ${ABLATION}
+      nfeats: ${DATASET.NFEATS}
+
+# =============================================================================
+# Loss
+# =============================================================================
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.0
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 0.0      # GPT loss 안씀 (hybrid는 diff_loss만)
+  LAMBDA_DIFF: 1.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+# =============================================================================
+# Metrics
+# =============================================================================
+METRIC:
+  TYPE: ['MRMetrics']
+  DIST_SYNC_ON_STEP: True
+
+# =============================================================================
+# Logger
+# =============================================================================
+LOGGER:
+  TYPE: ['tensorboard', 'wandb']
+  VAL_EVERY_STEPS: 1
+  WANDB:
+    params:
+      tags: ['sign', 'mbart_hybrid', 'multilingual']
+      project: signgpt3
+
+FOLDER: experiments/signgpt3
+DEBUG: False
+SEED_VALUE: 1234
+TINY: False
+FULL_CONFIG: false
