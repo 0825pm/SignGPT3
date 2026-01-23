@@ -22,3 +22,4 @@ checkpoints/
 data/
 *.ckpt
 *.mp4
+*.npz
