@@ -77,13 +77,12 @@ class MRMetrics(Metric):
         self.force_in_meter = force_in_meter
         self.njoints = njoints
 
-        # SOKE 133-dim Feature Part Indices
+        # SOKE 120-dim Feature Part Indices
         self.smplx_part2idx = {
             'upper_body': list(range(30)), 
             'lhand': list(range(30, 75)), 
             'rhand': list(range(75, 120)), 
-            'hand': list(range(30, 120)), 
-            'face': list(range(120, 133))
+            'hand': list(range(30, 120)),
         }
         
         # Joint part indices (55 joints)
@@ -100,14 +99,6 @@ class MRMetrics(Metric):
         for src in self.sources:
             self.add_state(f"{src}_count", default=torch.tensor(0), dist_reduce_fx="sum")
             self.add_state(f"{src}_count_seq", default=torch.tensor(0), dist_reduce_fx="sum")
-
-            # MPVPE metrics (vertex-based)
-            self.add_state(f"{src}_MPVPE_PA_all", default=torch.tensor([0.0]), dist_reduce_fx="sum")
-            self.add_state(f"{src}_MPVPE_PA_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
-            self.add_state(f"{src}_MPVPE_PA_face", default=torch.tensor([0.0]), dist_reduce_fx="sum")
-            self.add_state(f"{src}_MPVPE_all", default=torch.tensor([0.0]), dist_reduce_fx="sum")
-            self.add_state(f"{src}_MPVPE_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
-            self.add_state(f"{src}_MPVPE_face", default=torch.tensor([0.0]), dist_reduce_fx="sum")
             
             # MPJPE metrics (joint-based)
             self.add_state(f"{src}_MPJPE_PA_body", default=torch.tensor([0.0]), dist_reduce_fx="sum")
@@ -119,10 +110,8 @@ class MRMetrics(Metric):
             self.add_state(f"{src}_feat_error", default=torch.tensor([0.0]), dist_reduce_fx="sum")
             self.add_state(f"{src}_feat_error_hand", default=torch.tensor([0.0]), dist_reduce_fx="sum")
 
-        # Metric names - feat_error 포함
-        m = ["MPVPE_PA_all", "MPVPE_PA_hand", "MPVPE_PA_face",
-             "MPJPE_PA_body", "MPJPE_PA_hand", "MPJPE_body", "MPJPE_hand",
-             "MPVPE_all", "MPVPE_hand", "MPVPE_face",
+        # Metric names
+        m = ["MPJPE_PA_body", "MPJPE_PA_hand", "MPJPE_body", "MPJPE_hand",
              "feat_error", "feat_error_hand"]
         self.MR_metrics = []
         for d in self.sources:
@@ -185,7 +174,7 @@ class MRMetrics(Metric):
                 mr_metrics[name] = torch.tensor([0.0])
             else:
                 mr_metrics[name] = value / count
-                if 'MPVPE' in name or 'MPJPE' in name:
+                if 'MPJPE' in name:
                     mr_metrics[name] = mr_metrics[name] * factor
 
         if not sanity_flag:
@@ -221,85 +210,71 @@ class MRMetrics(Metric):
             
         B = len(lengths)
         
-        # Reshape joints if needed
+        # ===== Feature error =====
+        for i in range(B):
+            cur_len = lengths[i]
+            data_src = src[i]
+            
+            setattr(self, f'{data_src}_count', cur_len + getattr(self, f'{data_src}_count'))
+            setattr(self, f'{data_src}_count_seq', 1 + getattr(self, f'{data_src}_count_seq'))
+            
+            # Feature error (all)
+            feat_rst = feats_rst[i, :cur_len]
+            feat_ref = feats_ref[i, :cur_len]
+            feat_error = torch.mean(torch.abs(feat_rst - feat_ref)).item()
+            setattr(self, f'{data_src}_feat_error', 
+                    getattr(self, f'{data_src}_feat_error') + feat_error * cur_len)
+            
+            # Feature error (hand only)
+            hand_idx = self.smplx_part2idx['hand']
+            max_feat = feat_rst.shape[-1]
+            hand_idx = [i for i in hand_idx if i < max_feat]
+            if len(hand_idx) > 0:
+                feat_error_hand = torch.mean(torch.abs(feat_rst[..., hand_idx] - feat_ref[..., hand_idx])).item()
+                setattr(self, f'{data_src}_feat_error_hand', 
+                        getattr(self, f'{data_src}_feat_error_hand') + feat_error_hand * cur_len)
+        
+        # ===== Joint-based metrics (MPJPE) =====
         if joints_rst is not None and joints_ref is not None:
+            # Reshape joints if needed
             if joints_rst.dim() == 3:
                 BT, N, _ = joints_rst.shape
                 T = BT // B
                 joints_rst = joints_rst.reshape(B, T, N, 3)
                 joints_ref = joints_ref.reshape(B, T, N, 3)
+            
             joints_rst = joints_rst.detach().cpu()
             joints_ref = joints_ref.detach().cpu()
-        
-        # Reshape vertices if needed
-        if vertices_rst is not None and vertices_ref is not None:
-            if vertices_rst.dim() == 3:
-                BT, N, _ = vertices_rst.shape
-                T = BT // B
-                vertices_rst = vertices_rst.reshape(B, T, N, 3)
-                vertices_ref = vertices_ref.reshape(B, T, N, 3)
-            vertices_rst = vertices_rst.detach().cpu()
-            vertices_ref = vertices_ref.detach().cpu()
-        
-        for i in range(B):
-            cur_len = lengths[i]
-            data_src = src[i] if isinstance(src, list) else src
-            cur_name = name[i] if isinstance(name, list) else name
             
-            # Update count
-            setattr(self, f'{data_src}_count', cur_len + getattr(self, f'{data_src}_count'))
-            setattr(self, f'{data_src}_count_seq', 1 + getattr(self, f'{data_src}_count_seq'))
-            
-            # ===== Feature error metrics =====
-            if feats_rst is not None and feats_ref is not None:
-                f_rst = feats_rst[i, :cur_len]
-                f_ref = feats_ref[i, :cur_len]
+            for i in range(B):
+                cur_len = lengths[i]
+                data_src = src[i]
                 
-                feat_error = torch.abs(f_rst - f_ref).mean() * cur_len
-                setattr(self, f'{data_src}_feat_error', getattr(self, f'{data_src}_feat_error') + feat_error)
+                j_rst = joints_rst[i, :cur_len].numpy()
+                j_ref = joints_ref[i, :cur_len].numpy()
                 
-                hand_idx = self.smplx_part2idx['hand']
-                feat_error_hand = torch.abs(f_rst[:, hand_idx] - f_ref[:, hand_idx]).mean() * cur_len
-                setattr(self, f'{data_src}_feat_error_hand', getattr(self, f'{data_src}_feat_error_hand') + feat_error_hand)
-            
-            # ===== Vertex-based metrics (MPVPE) =====
-            if vertices_rst is not None and vertices_ref is not None:
-                mesh_gt = vertices_ref[i, :cur_len]
-                mesh_out = vertices_rst[i, :cur_len]
-                
-                mesh_out_align = rigid_align_torch_batch(mesh_out, mesh_gt)
-                if isinstance(mesh_out_align, np.ndarray):
-                    mesh_out_align = torch.from_numpy(mesh_out_align)
-                if isinstance(mesh_gt, np.ndarray):
-                    mesh_gt = torch.from_numpy(mesh_gt)
-                    
-                value = torch.mean(torch.sqrt(torch.sum((mesh_out_align - mesh_gt) ** 2, dim=-1)), dim=-1).sum()
-                setattr(self, f"{data_src}_MPVPE_PA_all", getattr(self, f"{data_src}_MPVPE_PA_all") + value)
-                
-                if isinstance(mesh_out, np.ndarray):
-                    mesh_out = torch.from_numpy(mesh_out)
-                value = torch.mean(torch.sqrt(torch.sum((mesh_out - mesh_gt) ** 2, dim=-1)), dim=-1).sum()
-                setattr(self, f"{data_src}_MPVPE_all", getattr(self, f"{data_src}_MPVPE_all") + value)
-            
-            # ===== Joint-based metrics (MPJPE) =====
-            if joints_rst is not None and joints_ref is not None:
-                j_rst = joints_rst[i, :cur_len].numpy() if isinstance(joints_rst, torch.Tensor) else joints_rst[i, :cur_len]
-                j_ref = joints_ref[i, :cur_len].numpy() if isinstance(joints_ref, torch.Tensor) else joints_ref[i, :cur_len]
-                
+                # MPJPE body
                 mpjpe_body = self._compute_mpjpe(j_rst, j_ref, part='body', use_pa=False)
-                setattr(self, f'{data_src}_MPJPE_body', getattr(self, f'{data_src}_MPJPE_body') + mpjpe_body * cur_len)
+                setattr(self, f'{data_src}_MPJPE_body', 
+                        getattr(self, f'{data_src}_MPJPE_body') + mpjpe_body * cur_len)
                 
+                # MPJPE_PA body
                 mpjpe_pa_body = self._compute_mpjpe(j_rst, j_ref, part='body', use_pa=True)
-                setattr(self, f'{data_src}_MPJPE_PA_body', getattr(self, f'{data_src}_MPJPE_PA_body') + mpjpe_pa_body * cur_len)
+                setattr(self, f'{data_src}_MPJPE_PA_body', 
+                        getattr(self, f'{data_src}_MPJPE_PA_body') + mpjpe_pa_body * cur_len)
                 
+                # MPJPE hand
                 mpjpe_lhand = self._compute_mpjpe(j_rst, j_ref, part='lhand', use_pa=False)
                 mpjpe_rhand = self._compute_mpjpe(j_rst, j_ref, part='rhand', use_pa=False)
                 mpjpe_hand = (mpjpe_lhand + mpjpe_rhand) / 2
-                setattr(self, f'{data_src}_MPJPE_hand', getattr(self, f'{data_src}_MPJPE_hand') + mpjpe_hand * cur_len)
+                setattr(self, f'{data_src}_MPJPE_hand', 
+                        getattr(self, f'{data_src}_MPJPE_hand') + mpjpe_hand * cur_len)
                 
+                # MPJPE_PA hand
                 mpjpe_pa_lhand = self._compute_mpjpe(j_rst, j_ref, part='lhand', use_pa=True)
                 mpjpe_pa_rhand = self._compute_mpjpe(j_rst, j_ref, part='rhand', use_pa=True)
                 mpjpe_pa_hand = (mpjpe_pa_lhand + mpjpe_pa_rhand) / 2
-                setattr(self, f'{data_src}_MPJPE_PA_hand', getattr(self, f'{data_src}_MPJPE_PA_hand') + mpjpe_pa_hand * cur_len)
+                setattr(self, f'{data_src}_MPJPE_PA_hand', 
+                        getattr(self, f'{data_src}_MPJPE_PA_hand') + mpjpe_pa_hand * cur_len)
         
         gc.collect()

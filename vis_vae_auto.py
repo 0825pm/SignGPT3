@@ -44,9 +44,9 @@ from matplotlib.animation import FuncAnimation, FFMpegWriter
 SOKE_BODY_DIM = 30      # upper body (10 joints × 3)
 SOKE_LHAND_DIM = 45     # left hand (15 joints × 3)
 SOKE_RHAND_DIM = 45     # right hand (15 joints × 3)
-SOKE_JAW_DIM = 3        # jaw (1 joint × 3)
-SOKE_EXPR_DIM = 10      # expression
-SOKE_TOTAL_DIM = 133
+# SOKE_JAW_DIM = 3        # jaw (1 joint × 3)
+# SOKE_EXPR_DIM = 10      # expression
+SOKE_TOTAL_DIM = 120
 POSE_SCALE = 2.0
 
 
@@ -310,7 +310,11 @@ def compute_metrics(gt_feats, recon_feats, gt_joints=None, recon_joints=None):
         metrics['feat_rmse_lhand'] = float(np.sqrt(((gt_feats[:, 30:75] - recon_feats[:, 30:75]) ** 2).mean()))
         metrics['feat_rmse_rhand'] = float(np.sqrt(((gt_feats[:, 75:120] - recon_feats[:, 75:120]) ** 2).mean()))
         metrics['feat_rmse_face'] = float(np.sqrt(((gt_feats[:, 120:133] - recon_feats[:, 120:133]) ** 2).mean()))
-    
+    elif gt_feats.shape[-1] == 120:
+        # body: [0:30], lhand: [30:75], rhand: [75:120]
+        metrics['feat_rmse_body'] = float(np.sqrt(((gt_feats[:, 0:30] - recon_feats[:, 0:30]) ** 2).mean()))
+        metrics['feat_rmse_lhand'] = float(np.sqrt(((gt_feats[:, 30:75] - recon_feats[:, 30:75]) ** 2).mean()))
+        metrics['feat_rmse_rhand'] = float(np.sqrt(((gt_feats[:, 75:120] - recon_feats[:, 75:120]) ** 2).mean()))
     # Joint space metrics
     if gt_joints is not None and recon_joints is not None:
         min_len = min(len(gt_joints), len(recon_joints))
