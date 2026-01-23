@@ -46,7 +46,7 @@ TRAIN:
   STAGE: lm_pretrain
   instruction_type: t2m
   NUM_WORKERS: 8
-  BATCH_SIZE: 512
+  BATCH_SIZE: 1024
   END_EPOCH: 300
   # VAE checkpoint path (수정 필요)
   PRETRAINED_VAE: /home/user/Projects/research/MotionGPT3/experiments/motgpt/SignGPT3_vae_mld/checkpoints/last.ckpt
