@@ -1,31 +1,27 @@
 """
-SignGPT3 LM (Text-to-Motion) Visualization Script
-For MotionGPT3's mBART Hybrid LM with Diffusion Head
+SignGPT3 VAE Reconstruction Visualization
+For MotionGPT3's Continuous MldVae (not VQ-VAE)
 
 Features:
 - Supports all splits: train, val, test
 - Supports all datasets: how2sign, csl, phoenix
-- Text-to-Motion generation with diffusion
-- GT vs Generated comparison (2-panel)
+- Continuous VAE (MldVae) with KL divergence
+- Multiple visualization modes: 2-panel, 3-view
 - Detailed metrics with JSON export
 
 Usage:
-    # Basic usage (val split, 2 samples per dataset)
-    python vis_lm.py --cfg configs/sign_lm_mbart_hybrid.yaml --output vis_lm_output --nodebug
+    # Basic usage (default: 2 samples per dataset per split)
+    python vis_vae.py --cfg configs/sign_vae.yaml --output vis_output --nodebug
 
     # Custom options
-    python vis_lm.py --cfg configs/sign_lm_mbart_hybrid.yaml --output vis_lm_output \\
-        --num_samples 5 --splits val,test --datasets how2sign,csl,phoenix
+    python vis_vae.py --cfg configs/sign_vae.yaml --output vis_output \\
+        --num_samples 3 --splits val,test --datasets how2sign,csl
 
     # Custom checkpoint
-    python vis_lm.py --cfg configs/sign_lm_mbart_hybrid.yaml --checkpoint path/to/ckpt.ckpt
+    python vis_vae.py --cfg configs/sign_vae.yaml --checkpoint path/to/ckpt.ckpt
 
-    # Custom text generation (without GT comparison)
-    python vis_lm.py --cfg configs/sign_lm_mbart_hybrid.yaml \\
-        --text "A person waves hello with their right hand"
-
-    # Multiple texts from file
-    python vis_lm.py --cfg configs/sign_lm_mbart_hybrid.yaml --text_file prompts.txt
+    # 3-view videos (front, side, top)
+    python vis_vae.py --cfg configs/sign_vae.yaml --three_view
 """
 
 import os
@@ -39,19 +35,17 @@ from tqdm import tqdm
 from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter
-from pathlib import Path
-
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 # =============================================================================
-# Constants
+# SOKE 133 dims format constants
 # =============================================================================
 SOKE_BODY_DIM = 30      # upper body (10 joints × 3)
 SOKE_LHAND_DIM = 45     # left hand (15 joints × 3)
 SOKE_RHAND_DIM = 45     # right hand (15 joints × 3)
-SOKE_TOTAL_DIM = 120
+SOKE_JAW_DIM = 3        # jaw (1 joint × 3)
+SOKE_EXPR_DIM = 10      # expression
+SOKE_TOTAL_DIM = 133
 POSE_SCALE = 2.0
 
 
@@ -99,197 +93,176 @@ def get_joint_colors():
     return {'body': 'blue', 'lhand': 'red', 'rhand': 'green'}
 
 
-def get_src_label(src):
-    """Normalize source dataset name."""
-    src_lower = src.lower() if src else 'unknown'
-    if 'how2sign' in src_lower or 'h2s' in src_lower:
-        return 'how2sign'
-    elif 'csl' in src_lower:
-        return 'csl'
-    elif 'phoenix' in src_lower:
-        return 'phoenix'
-    return src_lower
-
-
 # =============================================================================
 # Video Saving Functions
 # =============================================================================
 
-def save_comparison_video(gt_joints, gen_joints, save_path, title='', fps=25):
-    """Save GT vs Generated comparison video (2-panel)."""
-    T = max(len(gt_joints), len(gen_joints))
-    J = gt_joints.shape[1] if len(gt_joints) > 0 else gen_joints.shape[1]
+def save_comparison_video(gt_joints, recon_joints, save_path, title='', fps=20):
+    """Save GT vs Reconstruction comparison video (2-panel)."""
+    seqs = [gt_joints, recon_joints]
+    panel_titles = ['Ground Truth', 'Generated']
     
-    # Normalize to root
-    gt_joints = normalize_to_root(gt_joints)
-    gen_joints = normalize_to_root(gen_joints)
+    T = min(seq.shape[0] for seq in seqs)
+    J = gt_joints.shape[1]
     
-    # Setup figure
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    root_idx = 9 if J > 21 else 0
+    normalized_seqs = [normalize_to_root(seq.copy(), root_idx) for seq in seqs]
+    
+    all_joints = np.concatenate(normalized_seqs, axis=0)
+    
+    if J >= 55:
+        upper_body_idx = [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        hand_idx = list(range(25, min(55, J)))
+        valid_idx = upper_body_idx + hand_idx
+    else:
+        valid_idx = list(range(min(22, J)))
+    
+    all_x = all_joints[:, valid_idx, 0].flatten()
+    all_y = all_joints[:, valid_idx, 1].flatten()
+    
+    x_min, x_max = all_x.min(), all_x.max()
+    y_min, y_max = all_y.min(), all_y.max()
+    
+    max_range = max(x_max - x_min, y_max - y_min) * 1.2
+    x_mid = (x_max + x_min) / 2
+    y_mid = (y_max + y_min) / 2
+    
+    x_lim = (x_mid - max_range/2, x_mid + max_range/2)
+    y_lim = (y_mid - max_range/2, y_mid + max_range/2)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     
     if title:
-        # Truncate long titles
-        display_title = title[:100] + '...' if len(title) > 100 else title
-        fig.suptitle(display_title, fontsize=10, wrap=True)
+        fig.suptitle(title, fontsize=10)
+    
+    for ax, panel_title in zip(axes, panel_titles):
+        ax.set_xlim(x_lim)
+        ax.set_ylim(y_lim)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_title(panel_title, fontsize=11, fontweight='bold')
     
     connections = get_connections(J)
     colors = get_joint_colors()
     
-    all_elements = []
+    all_lines = []
+    all_scatters = []
     
-    for ax_idx, (ax, seq, label) in enumerate([
-        (axes[0], gt_joints, 'GT'),
-        (axes[1], gen_joints, 'Generated')
-    ]):
-        ax.set_title(label, fontsize=14, fontweight='bold')
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
-        ax.set_aspect('equal')
-        ax.axis('off')
-        
-        xi, yi = 0, 1  # x-y projection
-        
+    for ax in axes:
         lines = []
         for (i, j) in connections:
-            if i < 22 and j < 22:
-                color = colors['body']
-            elif i < 40 and j < 40:
-                color = colors['lhand']
-            else:
+            if i >= 40 or j >= 40:
                 color = colors['rhand']
-            line, = ax.plot([], [], color=color, linewidth=2, alpha=0.8)
+                lw = 1.0
+            elif i >= 25 or j >= 25:
+                color = colors['lhand']
+                lw = 1.0
+            else:
+                color = colors['body']
+                lw = 1.5
+            line, = ax.plot([], [], color=color, linewidth=lw, alpha=0.8)
             lines.append((line, i, j))
+        all_lines.append(lines)
         
-        scatter = ax.scatter([], [], c='black', s=30, zorder=5)
-        all_elements.append((seq, lines, scatter, xi, yi))
+        body_scatter = ax.scatter([], [], c=colors['body'], s=10, zorder=5)
+        lhand_scatter = ax.scatter([], [], c=colors['lhand'], s=5, zorder=5)
+        rhand_scatter = ax.scatter([], [], c=colors['rhand'], s=5, zorder=5)
+        all_scatters.append((body_scatter, lhand_scatter, rhand_scatter))
     
     plt.tight_layout()
     
+    upper_body_idx = [i for i in [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] if i < J]
+    
     def update(frame):
-        for (seq, lines, scatter, xi, yi) in all_elements:
+        for panel_idx, (seq, lines, scatters) in enumerate(zip(normalized_seqs, all_lines, all_scatters)):
             frame_data = seq[min(frame, len(seq)-1)]
-            x, y = frame_data[:, xi], frame_data[:, yi]
+            x, y = frame_data[:, 0], frame_data[:, 1]
             
             for (line, i, j) in lines:
                 line.set_data([x[i], x[j]], [y[i], y[j]])
             
-            scatter.set_offsets(np.c_[x, y])
+            body_scatter, lhand_scatter, rhand_scatter = scatters
+            body_scatter.set_offsets(np.c_[x[upper_body_idx], y[upper_body_idx]])
+            
+            if J > 25:
+                lhand_scatter.set_offsets(np.c_[x[25:40], y[25:40]])
+            if J > 40:
+                rhand_scatter.set_offsets(np.c_[x[40:55], y[40:55]])
         return []
     
     anim = FuncAnimation(fig, update, frames=T, interval=1000/fps, blit=False)
     
     try:
-        writer = FFMpegWriter(fps=fps, bitrate=3000)
+        writer = FFMpegWriter(fps=fps, bitrate=2000)
         anim.save(save_path, writer=writer)
-    except Exception:
-        anim.save(save_path.replace('.mp4', '.gif'), writer='pillow', fps=min(fps, 10))
+    except Exception as e:
+        print(f"    FFMpeg error: {e}, trying GIF...")
+        gif_path = save_path.replace('.mp4', '.gif')
+        anim.save(gif_path, writer='pillow', fps=min(fps, 10))
     
     plt.close(fig)
 
 
-def save_single_video(joints, save_path, title='', fps=25):
-    """Save single motion video (for custom text generation)."""
-    T, J, _ = joints.shape
-    
-    # Normalize to root
-    joints = normalize_to_root(joints)
-    
-    # Setup figure
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    
-    if title:
-        display_title = title[:80] + '...' if len(title) > 80 else title
-        ax.set_title(display_title, fontsize=12, wrap=True)
-    
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-1.5, 1.5)
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    connections = get_connections(J)
-    colors = get_joint_colors()
-    xi, yi = 0, 1
-    
-    lines = []
-    for (i, j) in connections:
-        if i < 22 and j < 22:
-            color = colors['body']
-        elif i < 40 and j < 40:
-            color = colors['lhand']
-        else:
-            color = colors['rhand']
-        line, = ax.plot([], [], color=color, linewidth=2, alpha=0.8)
-        lines.append((line, i, j))
-    
-    scatter = ax.scatter([], [], c='black', s=30, zorder=5)
-    
-    def update(frame):
-        frame_data = joints[min(frame, T-1)]
-        x, y = frame_data[:, xi], frame_data[:, yi]
-        
-        for (line, i, j) in lines:
-            line.set_data([x[i], x[j]], [y[i], y[j]])
-        
-        scatter.set_offsets(np.c_[x, y])
-        return []
-    
-    anim = FuncAnimation(fig, update, frames=T, interval=1000/fps, blit=False)
-    
-    try:
-        writer = FFMpegWriter(fps=fps, bitrate=3000)
-        anim.save(save_path, writer=writer)
-    except Exception:
-        anim.save(save_path.replace('.mp4', '.gif'), writer='pillow', fps=min(fps, 10))
-    
-    plt.close(fig)
-
-
-def save_three_view_video(gt_joints, gen_joints, save_path, title='', fps=25):
-    """Save 3-view comparison video (front, side, top)."""
-    T = max(len(gt_joints), len(gen_joints))
+def save_three_view_video(gt_joints, recon_joints, save_path, title='', fps=20):
+    """Save 3-view (front, side, top) comparison video."""
+    T = min(gt_joints.shape[0], recon_joints.shape[0])
     J = gt_joints.shape[1]
     
-    gt_joints = normalize_to_root(gt_joints)
-    gen_joints = normalize_to_root(gen_joints)
+    root_idx = 9 if J > 21 else 0
+    gt_norm = normalize_to_root(gt_joints.copy(), root_idx)
+    recon_norm = normalize_to_root(recon_joints.copy(), root_idx)
     
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    views = [('Front', 0, 1), ('Side', 2, 1), ('Top', 0, 2)]
+    
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
     if title:
-        display_title = title[:100] + '...' if len(title) > 100 else title
-        fig.suptitle(display_title, fontsize=10, wrap=True)
+        fig.suptitle(title, fontsize=11)
+    
+    bounds = {}
+    for view_name, xi, yi in views:
+        all_data = np.concatenate([gt_norm, recon_norm], axis=0)
+        all_x = all_data[:, :, xi].flatten()
+        all_y = all_data[:, :, yi].flatten()
+        max_range = max(all_x.max() - all_x.min(), all_y.max() - all_y.min()) * 1.2
+        x_mid = (all_x.max() + all_x.min()) / 2
+        y_mid = (all_y.max() + all_y.min()) / 2
+        bounds[view_name] = {
+            'xlim': (x_mid - max_range/2, x_mid + max_range/2),
+            'ylim': (y_mid - max_range/2, y_mid + max_range/2),
+        }
     
     connections = get_connections(J)
-    colors = get_joint_colors()
-    
-    views = [
-        ('Front (X-Y)', 0, 1),
-        ('Side (Z-Y)', 2, 1),
-        ('Top (X-Z)', 0, 2),
-    ]
-    
+    row_titles = ['Ground Truth', 'Generated']
     all_elements = []
     
-    for row_idx, (seq, row_label) in enumerate([(gt_joints, 'GT'), (gen_joints, 'Generated')]):
-        for col_idx, (view_name, xi, yi) in enumerate(views):
-            ax = axes[row_idx, col_idx]
-            ax.set_title(f'{row_label} - {view_name}', fontsize=11)
-            ax.set_xlim(-1.5, 1.5)
-            ax.set_ylim(-1.5, 1.5)
+    for row, (seq, row_title) in enumerate(zip([gt_norm, recon_norm], row_titles)):
+        for col, (view_name, xi, yi) in enumerate(views):
+            ax = axes[row, col]
+            b = bounds[view_name]
+            ax.set_xlim(b['xlim'])
+            ax.set_ylim(b['ylim'])
             ax.set_aspect('equal')
             ax.axis('off')
             
+            if row == 0:
+                ax.set_title(view_name, fontsize=10, fontweight='bold')
+            if col == 0:
+                ax.text(-0.15, 0.5, row_title, transform=ax.transAxes,
+                       fontsize=10, fontweight='bold', rotation=90, va='center')
+            
             lines = []
             for (i, j) in connections:
-                if i < 22 and j < 22:
-                    color = colors['body']
-                elif i < 40 and j < 40:
-                    color = colors['lhand']
+                if i >= 40 or j >= 40:
+                    color = 'green'
+                elif i >= 25 or j >= 25:
+                    color = 'red'
                 else:
-                    color = colors['rhand']
-                line, = ax.plot([], [], color=color, linewidth=2, alpha=0.8)
+                    color = 'blue'
+                line, = ax.plot([], [], color=color, linewidth=1.2, alpha=0.8)
                 lines.append((line, i, j))
             
-            scatter = ax.scatter([], [], c='black', s=20, zorder=5)
+            scatter = ax.scatter([], [], c='black', s=5, zorder=5)
             all_elements.append((seq, lines, scatter, xi, yi))
     
     plt.tight_layout()
@@ -320,140 +293,76 @@ def save_three_view_video(gt_joints, gen_joints, save_path, title='', fps=25):
 # Metrics Computation
 # =============================================================================
 
-def compute_metrics(gt_feats, gen_feats, gt_joints=None, gen_joints=None):
-    """Compute generation metrics."""
+def compute_metrics(gt_feats, recon_feats, gt_joints=None, recon_joints=None):
+    """Compute reconstruction metrics."""
     metrics = {}
     
-    # Ensure same length
-    min_len = min(len(gt_feats), len(gen_feats))
-    gt_feats = gt_feats[:min_len]
-    gen_feats = gen_feats[:min_len]
-    
     # Feature space metrics
-    metrics['feat_mse'] = float(((gt_feats - gen_feats) ** 2).mean())
+    metrics['feat_mse'] = float(((gt_feats - recon_feats) ** 2).mean())
     metrics['feat_rmse'] = float(np.sqrt(metrics['feat_mse']))
-    metrics['feat_l1'] = float(np.abs(gt_feats - gen_feats).mean())
+    metrics['feat_l1'] = float(np.abs(gt_feats - recon_feats).mean())
     
-    # Part-wise feature error (SOKE 120-dim format)
-    D = gt_feats.shape[-1]
-    if D >= 120:
-        body_idx = list(range(0, 30))
-        lhand_idx = list(range(30, 75))
-        rhand_idx = list(range(75, 120))
-        
-        metrics['feat_l1_body'] = float(np.abs(gt_feats[..., body_idx] - gen_feats[..., body_idx]).mean())
-        metrics['feat_l1_lhand'] = float(np.abs(gt_feats[..., lhand_idx] - gen_feats[..., lhand_idx]).mean())
-        metrics['feat_l1_rhand'] = float(np.abs(gt_feats[..., rhand_idx] - gen_feats[..., rhand_idx]).mean())
-        metrics['feat_l1_hand'] = float(np.abs(
-            gt_feats[..., lhand_idx + rhand_idx] - gen_feats[..., lhand_idx + rhand_idx]
-        ).mean())
-    
-    # Joint space metrics (MPJPE)
-    if gt_joints is not None and gen_joints is not None:
-        min_len = min(len(gt_joints), len(gen_joints))
+    # Joint space metrics
+    if gt_joints is not None and recon_joints is not None:
+        min_len = min(len(gt_joints), len(recon_joints))
         gt_j = gt_joints[:min_len]
-        gen_j = gen_joints[:min_len]
+        recon_j = recon_joints[:min_len]
         
-        diff = gt_j - gen_j
-        dist = np.sqrt((diff ** 2).sum(axis=-1))  # [T, J]
+        diff = gt_j - recon_j
+        dist = np.sqrt((diff ** 2).sum(axis=-1))
         metrics['mpjpe'] = float(dist.mean())
         
         J = gt_j.shape[1]
         if J >= 55:
-            body_idx = list(range(0, 22))
-            lhand_idx = list(range(25, 40))
-            rhand_idx = list(range(40, 55))
-            
+            body_idx = [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
             metrics['mpjpe_body'] = float(dist[:, body_idx].mean())
-            metrics['mpjpe_lhand'] = float(dist[:, lhand_idx].mean())
-            metrics['mpjpe_rhand'] = float(dist[:, rhand_idx].mean())
-            metrics['mpjpe_hand'] = float(dist[:, lhand_idx + rhand_idx].mean())
+            metrics['mpjpe_lhand'] = float(dist[:, 25:40].mean())
+            metrics['mpjpe_rhand'] = float(dist[:, 40:55].mean())
         
-        # Velocity error
         gt_vel = np.diff(gt_j, axis=0)
-        gen_vel = np.diff(gen_j, axis=0)
-        if len(gt_vel) > 0 and len(gen_vel) > 0:
-            min_vel_len = min(len(gt_vel), len(gen_vel))
-            metrics['vel_error'] = float(np.abs(gt_vel[:min_vel_len] - gen_vel[:min_vel_len]).mean())
+        recon_vel = np.diff(recon_j, axis=0)
+        metrics['vel_error'] = float(np.abs(gt_vel - recon_vel).mean())
+        
+        gt_vel_mag = np.abs(gt_vel).mean()
+        recon_vel_mag = np.abs(recon_vel).mean()
+        metrics['vel_ratio'] = float(recon_vel_mag / (gt_vel_mag + 1e-8))
     
     return metrics
 
 
 # =============================================================================
-# LM Forward Functions
+# LM Generate Function
 # =============================================================================
 
-def lm_generate(model, text, length, device='cuda'):
+def lm_generate(model, text, length):
     """
     Generate motion from text using LM.
-    
-    Args:
-        model: MotGPT model with vae and lm
-        text: list of text strings or single string
-        length: list of target lengths or single int
-        
-    Returns:
-        feats_gen: [B, T, D] generated features
     """
-    if isinstance(text, str):
-        text = [text]
-    if isinstance(length, int):
-        length = [length] * len(text)
-    
-    model.eval()
-    
-    with torch.no_grad():
-        # LM generates motion latent z
-        motion_z = model.lm.generate(
-            text=text,
-            lengths=length,
-        )
-        
-        # VAE decodes to motion features
-        feats_gen = model.vae.decode(motion_z, length)
-    
-    return feats_gen
+    motion_z = model.lm.generate(text=[text], lengths=[length])
+    feats_pred = model.vae.decode(motion_z, [length])
+    return feats_pred
 
 
 # =============================================================================
-# Checkpoint Loading
+# Dataset Source Detection
 # =============================================================================
 
-def load_checkpoint(ckpt_path, model, strict=False):
-    """Load model checkpoint."""
-    print(f"  Loading checkpoint: {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location='cpu')
+def normalize_source_name(src):
+    """Normalize dataset source name."""
+    src_lower = src.lower() if src else 'unknown'
     
-    if 'state_dict' in ckpt:
-        state_dict = ckpt['state_dict']
+    if 'how2sign' in src_lower or 'h2s' in src_lower:
+        return 'how2sign'
+    elif 'csl' in src_lower:
+        return 'csl'
+    elif 'phoenix' in src_lower:
+        return 'phoenix'
     else:
-        state_dict = ckpt
-    
-    # Remove 'model.' prefix if present
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith('model.'):
-            new_state_dict[k[6:]] = v
-        else:
-            new_state_dict[k] = v
-    
-    # load_state_dict returns different things depending on PyTorch/Lightning version
-    result = model.load_state_dict(new_state_dict, strict=strict)
-    
-    if result is not None:
-        missing, unexpected = result.missing_keys, result.unexpected_keys
-        if missing:
-            print(f"  Missing keys: {len(missing)}")
-        if unexpected:
-            print(f"  Unexpected keys: {len(unexpected)}")
-    else:
-        print(f"  Checkpoint loaded (strict={strict})")
-    
-    return model
+        return src_lower
 
 
 # =============================================================================
-# Main Function
+# Main Visualization Function
 # =============================================================================
 
 def main():
@@ -466,28 +375,22 @@ def main():
     )
     parser.add_argument('--num_samples', type=int, default=2,
                        help='Number of samples per dataset per split (default: 2)')
-    parser.add_argument('--output', type=str, default='vis_lm_output',
-                       help='Output directory (default: vis_lm_output)')
+    parser.add_argument('--output', type=str, default='vis_output',
+                       help='Output directory (default: vis_output)')
     parser.add_argument('--fps', type=int, default=25,
                        help='Video FPS (default: 25)')
     parser.add_argument('--three_view', action='store_true',
                        help='Generate 3-view videos instead of 2-panel')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Override checkpoint path')
-    parser.add_argument('--splits', type=str, default='val',
-                       help='Comma-separated splits to process (default: val)')
+    parser.add_argument('--splits', type=str, default='val,test',
+                       help='Comma-separated splits to process (default: val,test)')
     parser.add_argument('--datasets', type=str, default='how2sign,csl,phoenix',
                        help='Comma-separated datasets (default: how2sign,csl,phoenix)')
     parser.add_argument('--no_video', action='store_true',
                        help='Skip video generation (metrics only)')
     parser.add_argument('--gpu', type=int, default=0,
                        help='GPU device ID (default: 0)')
-    parser.add_argument('--text', type=str, default=None,
-                       help='Custom text for generation (no GT comparison)')
-    parser.add_argument('--text_file', type=str, default=None,
-                       help='File with text prompts (one per line)')
-    parser.add_argument('--gen_length', type=int, default=100,
-                       help='Generated motion length for custom text (default: 100)')
     
     custom_args, remaining = parser.parse_known_args()
     
@@ -495,29 +398,34 @@ def main():
     if custom_args.gpu is not None:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(custom_args.gpu)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
     # Replace sys.argv for motGPT's parse_args
     sys.argv = [sys.argv[0]] + remaining
     
-    # Import motGPT modules
+    # Import motGPT modules (SignGPT3)
     from motGPT.config import parse_args
     from motGPT.data.build_data import build_data
     from motGPT.models.build_model import build_model
+    from motGPT.utils.load_checkpoint import load_pretrained_vae
     
     # Parse config
-    cfg = parse_args()
+    cfg = parse_args(phase="test")
     
-    # Setup output directory
-    output_dir = Path(custom_args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Create output directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = custom_args.output
+    os.makedirs(output_dir, exist_ok=True)
     
-    cfg.FOLDER_EXP = str(output_dir)
+    # Set FOLDER_EXP (required by model)
+    cfg.FOLDER_EXP = output_dir
     cfg.DEBUG = False
     
-    # Parse options
+    # Set seed
+    seed = cfg.SEED_VALUE if hasattr(cfg, 'SEED_VALUE') else 42
+    pl.seed_everything(seed)
+    
+    # Parse splits and datasets
     splits_to_process = [s.strip() for s in custom_args.splits.split(',')]
-    datasets_to_process = [d.strip() for d in custom_args.datasets.split(',')]
+    datasets_to_process = [d.strip().lower() for d in custom_args.datasets.split(',')]
     
     # =========================
     # Print Configuration
@@ -525,38 +433,56 @@ def main():
     print(f"\n{'='*70}")
     print("SignGPT3 LM Text-to-Motion Visualization")
     print(f"{'='*70}")
-    print(f"Config: {cfg.NAME}")
+    print(f"Config: {cfg.NAME if hasattr(cfg, 'NAME') else 'Unknown'}")
     print(f"Output: {output_dir}")
+    print(f"Samples per dataset per split: {custom_args.num_samples}")
     print(f"Splits: {splits_to_process}")
     print(f"Datasets: {datasets_to_process}")
-    print(f"Samples per dataset: {custom_args.num_samples}")
     print(f"Video mode: {'3-view' if custom_args.three_view else '2-panel'}")
     print(f"FPS: {custom_args.fps}")
-    print(f"Device: {device}")
     
     # =========================
-    # Build Model & Data
+    # Build DataModule
     # =========================
-    print(f"\n[1/3] Building datamodule...")
-    datamodule = build_data(cfg)
-    datamodule.setup('fit')
+    print("\n[1/3] Loading datamodule...")
+    datamodule = build_data(cfg, phase="test")
+    datamodule.setup(stage='test')
     
-    print(f"[2/3] Building model...")
+    # =========================
+    # Build Model
+    # =========================
+    print("[2/3] Loading model...")
     model = build_model(cfg, datamodule)
     
-    # Load checkpoint
-    if custom_args.checkpoint:
-        ckpt_path = custom_args.checkpoint
-    elif hasattr(cfg.TEST, 'CHECKPOINTS') and cfg.TEST.CHECKPOINTS:
-        ckpt_path = cfg.TEST.CHECKPOINTS
-    elif hasattr(cfg.TRAIN, 'PRETRAINED') and cfg.TRAIN.PRETRAINED:
-        ckpt_path = cfg.TRAIN.PRETRAINED
+    # Check CUDA
+    if not torch.cuda.is_available():
+        print("WARNING: CUDA not available, using CPU")
+        device = torch.device('cpu')
     else:
-        ckpt_path = None
-        print("  Warning: No checkpoint specified!")
+        device = torch.device('cuda:0')
     
-    if ckpt_path and os.path.exists(ckpt_path):
-        model = load_checkpoint(ckpt_path, model, strict=False)
+    print(f"  Device: {device}")
+    
+    # Load weights
+    def load_checkpoint(path):
+        state_dict = torch.load(path, map_location=device, weights_only=False)
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        return state_dict
+    
+    if custom_args.checkpoint:
+        print(f"  Loading checkpoint: {custom_args.checkpoint}")
+        state_dict = load_checkpoint(custom_args.checkpoint)
+        model.load_state_dict(state_dict, strict=False)
+    elif hasattr(cfg.TRAIN, 'PRETRAINED_VAE') and cfg.TRAIN.PRETRAINED_VAE:
+        print(f"  Loading VAE: {cfg.TRAIN.PRETRAINED_VAE}")
+        load_pretrained_vae(cfg, model, logger=None)
+    elif hasattr(cfg.TEST, 'CHECKPOINTS') and cfg.TEST.CHECKPOINTS:
+        print(f"  Loading checkpoint: {cfg.TEST.CHECKPOINTS}")
+        state_dict = load_checkpoint(cfg.TEST.CHECKPOINTS)
+        model.load_state_dict(state_dict, strict=False)
+    else:
+        print("  Warning: No checkpoint loaded, using random weights")
     
     model.eval()
     model.to(device)
@@ -565,9 +491,11 @@ def main():
     # Print Model Info
     # =========================
     print(f"\n[Model Info]")
-    print(f"  Stage: {cfg.TRAIN.STAGE}")
-    if hasattr(model, 'vae'):
-        print(f"  VAE: {type(model.vae).__name__}")
+    print(f"  VAE type: MldVae (Continuous)")
+    if hasattr(model.vae, 'latent_dim'):
+        print(f"  Latent dim: {model.vae.latent_dim}")
+    if hasattr(model.vae, 'nfeats'):
+        print(f"  Input features: {model.vae.nfeats}")
     if hasattr(model, 'lm'):
         print(f"  LM: {type(model.lm).__name__}")
     
@@ -577,67 +505,10 @@ def main():
         feats2joints = datamodule.feats2joints
         print(f"  feats2joints: Available")
     else:
-        print(f"  feats2joints: Not available")
+        print(f"  feats2joints: Not available (will use feature visualization)")
     
     # =========================
-    # Custom Text Generation Mode
-    # =========================
-    if custom_args.text or custom_args.text_file:
-        print(f"\n{'='*70}")
-        print("Custom Text Generation Mode")
-        print(f"{'='*70}")
-        
-        # Get texts
-        if custom_args.text:
-            texts = [custom_args.text]
-        else:
-            with open(custom_args.text_file, 'r') as f:
-                texts = [line.strip() for line in f if line.strip()]
-        
-        custom_output_dir = output_dir / 'custom'
-        custom_output_dir.mkdir(exist_ok=True)
-        
-        for i, text in enumerate(texts):
-            print(f"\n[{i+1}/{len(texts)}] Text: {text[:80]}...")
-            
-            with torch.no_grad():
-                # Generate motion
-                feats_gen = lm_generate(
-                    model, text, custom_args.gen_length, device
-                )
-                feats_gen = feats_gen[0].cpu().numpy()  # [T, D]
-            
-            # Convert to joints
-            joints_gen = None
-            if feats2joints is not None:
-                try:
-                    result = feats2joints(torch.from_numpy(feats_gen).unsqueeze(0).to(device))
-                    if isinstance(result, tuple):
-                        _, joints = result
-                    else:
-                        joints = result
-                    joints_gen = joints[0].cpu().numpy()  # [T, J, 3]
-                except Exception as e:
-                    print(f"    Warning: feats2joints failed: {e}")
-            
-            # Save video
-            if not custom_args.no_video and joints_gen is not None:
-                video_path = custom_output_dir / f'gen_{i:03d}.mp4'
-                save_single_video(joints_gen, str(video_path), title=text, fps=custom_args.fps)
-                print(f"    Saved: {video_path}")
-            
-            # Save features
-            np.save(custom_output_dir / f'gen_{i:03d}_feats.npy', feats_gen)
-            
-            # Save text
-            with open(custom_output_dir / f'gen_{i:03d}_text.txt', 'w') as f:
-                f.write(text)
-        
-        print(f"\nCustom generation complete! Output: {custom_output_dir}")
-        return
-    
-    # =========================
-    # Dataset-based Generation Mode
+    # Process Each Split
     # =========================
     print(f"\n[3/3] Processing samples...")
     
@@ -665,8 +536,8 @@ def main():
             continue
         
         # Create output subdirectory
-        split_output_dir = output_dir / split
-        split_output_dir.mkdir(exist_ok=True)
+        split_output_dir = os.path.join(output_dir, split)
+        os.makedirs(split_output_dir, exist_ok=True)
         
         # Track collected samples
         collected = {ds: 0 for ds in datasets_to_process}
@@ -675,8 +546,7 @@ def main():
         def all_collected():
             return all(collected[ds] >= target_per_dataset for ds in datasets_to_process)
         
-        # Process batches (vis_vae.py style - individual sample processing)
-        for batch in tqdm(dataloader, desc=f'{split}'):
+        for batch in tqdm(dataloader, desc=f"{split}"):
             if all_collected():
                 break
             
@@ -684,12 +554,12 @@ def main():
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
                     for k, v in batch.items()}
             
-            motion = batch['motion']
+            feats_ref = batch['motion']
             lengths = batch['length']
-            texts = batch['text']
+            texts = batch.get('text', [''] * len(lengths))
             names = batch.get('name', [f'sample_{i}' for i in range(len(lengths))])
-            srcs = batch.get('src', ['unknown'] * len(lengths))
-            B = motion.shape[0]
+            srcs = batch.get('src', ['how2sign'] * len(lengths))
+            B = feats_ref.shape[0]
             
             with torch.no_grad():
                 for i in range(B):
@@ -704,57 +574,46 @@ def main():
                     src = srcs[i] if srcs else 'unknown'
                     text = texts[i] if texts else ''
                     
-                    src_key = get_src_label(src)
+                    src_key = normalize_source_name(src)
                     
                     if src_key not in datasets_to_process:
                         continue
                     if collected[src_key] >= target_per_dataset:
                         continue
                     
-                    # ========================================
-                    # Generate motion for this single sample
-                    # ========================================
-                    try:
-                        feats_gen = lm_generate(model, [text], [length], device)
-                        feats_gen = feats_gen[0]  # [T, D]
-                    except Exception as e:
-                        print(f"    Warning: Generation failed for {name}: {e}")
-                        continue
+                    # Generate motion from text using LM
+                    feats_pred = lm_generate(model, text, length)
                     
-                    # Get GT features
-                    gt_feats = motion[i, :length]
-                    
-                    # ========================================
                     # Convert to joints
-                    # ========================================
                     has_joints = False
                     gt_joints_np = None
-                    gen_joints_np = None
+                    recon_joints_np = None
                     
                     if feats2joints is not None:
                         try:
-                            gt_input = motion[i:i+1, :length]
-                            gen_input = feats_gen.unsqueeze(0)
+                            gt_input = feats_ref[i:i+1, :length].to(device)
+                            recon_input = feats_pred.to(device)
+                            
+                            # Handle both single and tuple return values
+                            gt_result = feats2joints(gt_input)
+                            recon_result = feats2joints(recon_input)
                             
                             # feats2joints may return (vertices, joints) or just joints
-                            gt_result = feats2joints(gt_input)
-                            gen_result = feats2joints(gen_input)
-                            
                             if isinstance(gt_result, tuple):
-                                gt_joints = gt_result[-1]
-                                gen_joints = gen_result[-1]
+                                gt_joints = gt_result[-1]  # joints is usually last
+                                recon_joints = recon_result[-1]
                             else:
                                 gt_joints = gt_result
-                                gen_joints = gen_result
+                                recon_joints = recon_result
                             
                             gt_joints = gt_joints * POSE_SCALE
-                            gen_joints = gen_joints * POSE_SCALE
+                            recon_joints = recon_joints * POSE_SCALE
                             gt_joints_np = gt_joints.cpu().numpy()
-                            gen_joints_np = gen_joints.cpu().numpy()
+                            recon_joints_np = recon_joints.cpu().numpy()
                             
                             if gt_joints_np.ndim == 4:
                                 gt_joints_np = gt_joints_np[0]
-                                gen_joints_np = gen_joints_np[0]
+                                recon_joints_np = recon_joints_np[0]
                             
                             has_joints = True
                         except Exception as e:
@@ -762,32 +621,24 @@ def main():
                                 print(f"    Note: feats2joints failed ({e})")
                             has_joints = False
                     
-                    # Get numpy arrays for metrics
-                    gt_feats_np = gt_feats.cpu().numpy()
-                    gen_feats_np = feats_gen.cpu().numpy()
+                    # Get feature arrays
+                    gt_feats_np = feats_ref[i, :length].cpu().numpy()
+                    recon_feats_np = feats_pred[0].cpu().numpy()
                     
-                    # ========================================
                     # Compute metrics
-                    # ========================================
-                    metrics = compute_metrics(gt_feats_np, gen_feats_np, gt_joints_np, gen_joints_np)
+                    metrics = compute_metrics(gt_feats_np, recon_feats_np, gt_joints_np, recon_joints_np)
                     metrics['name'] = name
                     metrics['src'] = src_key
                     metrics['split'] = split
-                    metrics['text'] = text[:200]
                     metrics['length'] = int(length)
+                    metrics['text'] = text[:200]
                     all_metrics.append(metrics)
                     
-                    # ========================================
                     # Print sample info
-                    # ========================================
                     print(f"\n[{split}/{src_key}] {name}")
-                    print(f"  Text: {text[:60]}...")
+                    print(f"  Text: {text[:80]}...")
                     print(f"  Length: {length} frames")
-                    print(f"  Feature L1: {metrics['feat_l1']:.4f}")
-                    
-                    if 'feat_l1_body' in metrics:
-                        print(f"  Feature L1 - Body: {metrics['feat_l1_body']:.4f}, "
-                              f"Hand: {metrics.get('feat_l1_hand', 0):.4f}")
+                    print(f"  Feature RMSE: {metrics['feat_rmse']:.6f}")
                     
                     if has_joints and 'mpjpe' in metrics:
                         print(f"  MPJPE: {metrics['mpjpe']:.4f}")
@@ -796,37 +647,24 @@ def main():
                                   f"LHand: {metrics['mpjpe_lhand']:.4f}, "
                                   f"RHand: {metrics['mpjpe_rhand']:.4f}")
                     
-                    # ========================================
                     # Save video
-                    # ========================================
                     if has_joints and not custom_args.no_video:
-                        ds_output_dir = split_output_dir / src_key
-                        ds_output_dir.mkdir(exist_ok=True)
+                        ds_output_dir = os.path.join(split_output_dir, src_key)
+                        os.makedirs(ds_output_dir, exist_ok=True)
                         
-                        safe_name = name.replace('/', '_').replace('\\', '_')[:50]
+                        safe_name = name.replace('/', '_').replace('\\', '_')
                         
                         if custom_args.three_view:
-                            video_path = ds_output_dir / f'{collected[src_key]:03d}_{safe_name}_3view.mp4'
-                            save_three_view_video(gt_joints_np, gen_joints_np, str(video_path),
-                                                 f'{split}/{src_key}: {text[:60]}', custom_args.fps)
+                            video_path = os.path.join(ds_output_dir, 
+                                                      f'{collected[src_key]:03d}_{safe_name}_3view.mp4')
+                            save_three_view_video(gt_joints_np, recon_joints_np, video_path,
+                                                 f'{split}/{src_key}: {name}', custom_args.fps)
                         else:
-                            video_path = ds_output_dir / f'{collected[src_key]:03d}_{safe_name}.mp4'
-                            save_comparison_video(gt_joints_np, gen_joints_np, str(video_path),
-                                                 f'{split}/{src_key}: {text[:60]}', custom_args.fps)
+                            video_path = os.path.join(ds_output_dir, 
+                                                      f'{collected[src_key]:03d}_{safe_name}.mp4')
+                            save_comparison_video(gt_joints_np, recon_joints_np, video_path,
+                                                 f'{split}/{src_key}: {name}', custom_args.fps)
                         print(f"  Saved: {video_path}")
-                    
-                    # Save features
-                    ds_output_dir = split_output_dir / src_key
-                    ds_output_dir.mkdir(exist_ok=True)
-                    safe_name = name.replace('/', '_').replace('\\', '_')[:50]
-                    np.savez(
-                        ds_output_dir / f'{collected[src_key]:03d}_{safe_name}_feats.npz',
-                        gt_feats=gt_feats_np,
-                        gen_feats=gen_feats_np,
-                        text=text,
-                        name=name,
-                        src=src_key
-                    )
                     
                     collected[src_key] += 1
                     global_sample_idx += 1
@@ -837,42 +675,65 @@ def main():
             print(f"  {ds}: {count}/{target_per_dataset}")
     
     # =========================
-    # Save Summary
+    # Print Summary
     # =========================
     print(f"\n{'='*70}")
     print("Summary")
     print(f"{'='*70}")
+    print(f"Total samples: {len(all_metrics)}")
     
-    # Save metrics JSON
-    metrics_path = output_dir / 'metrics.json'
-    with open(metrics_path, 'w') as f:
-        json.dump(all_metrics, f, indent=2)
-    print(f"Metrics saved to: {metrics_path}")
-    
-    # Compute aggregate metrics
     if all_metrics:
-        print(f"\nAggregate Metrics:")
+        print(f"\n[Overall]")
+        print(f"  Avg Feature RMSE: {np.mean([m['feat_rmse'] for m in all_metrics]):.6f}")
+        if 'mpjpe' in all_metrics[0]:
+            print(f"  Avg MPJPE: {np.mean([m['mpjpe'] for m in all_metrics]):.4f}")
         
-        for src in datasets_to_process:
-            src_metrics = [m for m in all_metrics if m['src'] == src]
-            if not src_metrics:
+        # Per-split metrics
+        for split in splits_to_process:
+            split_metrics = [m for m in all_metrics if m.get('split') == split]
+            if not split_metrics:
                 continue
             
-            print(f"\n  [{src.upper()}] ({len(src_metrics)} samples)")
+            print(f"\n[{split.upper()}] ({len(split_metrics)} samples)")
+            print(f"  Avg Feature RMSE: {np.mean([m['feat_rmse'] for m in split_metrics]):.6f}")
+            if 'mpjpe' in split_metrics[0]:
+                print(f"  Avg MPJPE: {np.mean([m['mpjpe'] for m in split_metrics]):.4f}")
             
-            for key in ['feat_l1', 'feat_l1_body', 'feat_l1_hand', 'mpjpe', 'mpjpe_body', 'mpjpe_hand']:
-                values = [m[key] for m in src_metrics if key in m]
-                if values:
-                    mean_val = np.mean(values)
-                    std_val = np.std(values)
-                    print(f"    {key}: {mean_val:.4f} ± {std_val:.4f}")
+            for ds in datasets_to_process:
+                ds_metrics = [m for m in split_metrics if m.get('src') == ds]
+                if not ds_metrics:
+                    continue
+                
+                print(f"\n    [{ds}] ({len(ds_metrics)} samples)")
+                print(f"      Feature RMSE: {np.mean([m['feat_rmse'] for m in ds_metrics]):.6f}")
+                if 'mpjpe' in ds_metrics[0]:
+                    print(f"      MPJPE: {np.mean([m['mpjpe'] for m in ds_metrics]):.4f}")
     
-    print(f"\nTotal samples processed: {len(all_metrics)}")
-    print(f"Output directory: {output_dir}")
-    print(f"\n{'='*70}")
-    print("Done!")
-    print(f"{'='*70}")
+    # =========================
+    # Save Metrics to JSON
+    # =========================
+    metrics_path = os.path.join(output_dir, 'metrics.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(all_metrics, f, indent=2)
+    print(f"\nMetrics saved to: {metrics_path}")
+    
+    # Save config summary
+    config_summary = {
+        'config_name': cfg.NAME if hasattr(cfg, 'NAME') else 'Unknown',
+        'timestamp': timestamp,
+        'num_samples_per_dataset_per_split': custom_args.num_samples,
+        'splits': splits_to_process,
+        'datasets': datasets_to_process,
+        'model_type': 'LM Text-to-Motion',
+        'total_samples': len(all_metrics),
+    }
+    config_path = os.path.join(output_dir, 'config_summary.json')
+    with open(config_path, 'w') as f:
+        json.dump(config_summary, f, indent=2)
+    
+    print(f"Config summary saved to: {config_path}")
+    print(f"\nOutput directory: {output_dir}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

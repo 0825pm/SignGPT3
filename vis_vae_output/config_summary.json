@@ -1,0 +1,16 @@
+{
+  "config_name": "SignGPT3_vae_mld",
+  "timestamp": "20260124_174405",
+  "num_samples_per_dataset_per_split": 2,
+  "splits": [
+    "val",
+    "test"
+  ],
+  "datasets": [
+    "how2sign",
+    "csl",
+    "phoenix"
+  ],
+  "vae_type": "MldVae (Continuous)",
+  "total_samples": 12
+}
