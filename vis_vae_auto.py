@@ -349,7 +349,7 @@ def compute_metrics(gt_feats, recon_feats, gt_joints=None, recon_joints=None):
 
 def mldvae_forward(model, feats_ref, length):
     """
-    Forward pass through MldVae or MultiPartVae.
+    Forward pass through MldVae, MultiPartVae, or LightPartMambaVae.
     
     MldVae uses:
     - encode(features, lengths) → (z, dist)
@@ -359,12 +359,19 @@ def mldvae_forward(model, feats_ref, length):
     - encode(features, lengths) → (z_dict, dist_dict)
     - decode(z_dict, lengths) → features
     
+    LightPartMambaVae uses:
+    - encode(features, lengths) → (z, dist)  # z: [B, 3, 256]
+    - decode(z, lengths) → features
+    
     Returns:
         feats_pred: reconstructed features
         vae_info: dict with mu, var statistics
     """
-    # Check if MultiPartVae (has 'parts' attribute)
+    # Check VAE type
     is_multipart = hasattr(model.vae, 'parts')
+    is_lightpart = hasattr(model.vae, 'part_tokens') or (
+        hasattr(model.vae, 'latent_size') and model.vae.latent_size == 3 and not is_multipart
+    )
     
     if is_multipart:
         # MultiPartVae: returns dict
@@ -405,6 +412,48 @@ def mldvae_forward(model, feats_ref, length):
         vae_info['latent']['var_mean'] = total_var_mean / num_parts
         vae_info['latent']['var_std'] = np.mean([vae_info['latent']['parts'][p]['var_std'] for p in model.vae.parts])
         vae_info['latent']['z_norm'] = sum(vae_info['latent']['parts'][p]['z_norm'] for p in model.vae.parts)
+        
+    elif is_lightpart:
+        # LightPartMambaVae: z is [B, 3, 256] tensor
+        z, dist = model.vae.encode(feats_ref[:, :length], [length])
+        feats_pred = model.vae.decode(z, [length])
+        
+        # z shape: [B, 3, 256] → part-wise stats
+        part_names = ['body', 'lhand', 'rhand']
+        vae_info = {
+            'latent': {
+                'type': 'lightpart',
+                'parts': {}
+            }
+        }
+        
+        total_mu_mean = 0
+        total_var_mean = 0
+        
+        for i, part in enumerate(part_names):
+            # dist.loc, dist.scale: [B, 3, 256]
+            part_mu = dist.loc[:, i, :]   # [B, 256]
+            part_std = dist.scale[:, i, :]  # [B, 256]
+            part_z = z[:, i, :]  # [B, 256]
+            
+            part_info = {
+                'mu_mean': float(part_mu.mean().item()),
+                'mu_std': float(part_mu.std().item()),
+                'var_mean': float(part_std.mean().item()),
+                'var_std': float(part_std.std().item()),
+                'z_norm': float(part_z.norm().item()),
+            }
+            vae_info['latent']['parts'][part] = part_info
+            
+            total_mu_mean += part_info['mu_mean']
+            total_var_mean += part_info['var_mean']
+        
+        # Average across parts
+        vae_info['latent']['mu_mean'] = total_mu_mean / 3
+        vae_info['latent']['mu_std'] = np.mean([vae_info['latent']['parts'][p]['mu_std'] for p in part_names])
+        vae_info['latent']['var_mean'] = total_var_mean / 3
+        vae_info['latent']['var_std'] = np.mean([vae_info['latent']['parts'][p]['var_std'] for p in part_names])
+        vae_info['latent']['z_norm'] = float(z.norm().item())
         
     else:
         # Standard MldVae
@@ -569,17 +618,30 @@ def main():
     # Print Model Info
     # =========================
     is_multipart = hasattr(model.vae, 'parts')
-    vae_type = 'MultiPartVae' if is_multipart else 'MldVae'
+    is_lightpart = hasattr(model.vae, 'part_tokens') or (
+        hasattr(model.vae, 'latent_size') and model.vae.latent_size == 3 and not is_multipart
+    )
+    
+    if is_multipart:
+        vae_type = 'MultiPartVae'
+    elif is_lightpart:
+        vae_type = 'LightPartMambaVae'
+    else:
+        vae_type = 'MldVae'
     
     print(f"\n[Model Info]")
     print(f"  VAE type: {vae_type}")
     if hasattr(model.vae, 'latent_dim'):
         print(f"  Latent dim: {model.vae.latent_dim}")
+    if hasattr(model.vae, 'latent_size'):
+        print(f"  Latent size: {model.vae.latent_size}")
     if hasattr(model.vae, 'nfeats'):
         print(f"  Input features: {model.vae.nfeats}")
     if is_multipart:
         print(f"  Parts: {model.vae.parts}")
         print(f"  Part latent dims: {model.vae.part_latent_dims}")
+    elif is_lightpart:
+        print(f"  Parts: body, lhand, rhand (via part tokens)")
     
     # Get feats2joints converter
     feats2joints = None
@@ -734,8 +796,9 @@ def main():
                     
                     # Print VAE info
                     latent_info = vae_info['latent']
-                    if latent_info.get('type') == 'multipart':
-                        print(f"  Latent (MultiPart):")
+                    if latent_info.get('type') in ('multipart', 'lightpart'):
+                        type_name = 'MultiPart' if latent_info.get('type') == 'multipart' else 'LightPart'
+                        print(f"  Latent ({type_name}):")
                         for part, pinfo in latent_info['parts'].items():
                             print(f"    {part}: mu={pinfo['mu_mean']:.4f}±{pinfo['mu_std']:.4f}, "
                                   f"var={pinfo['var_mean']:.4f}, z_norm={pinfo['z_norm']:.4f}")
@@ -824,10 +887,11 @@ def main():
         print(f"  Avg mu: {np.mean(mu_means):.4f} ± {np.std(mu_means):.4f}")
         print(f"  Avg var: {np.mean(var_means):.4f} ± {np.std(var_means):.4f}")
         
-        # MultiPart-specific stats
-        if is_multipart and 'parts' in all_metrics[0]['vae_info']['latent']:
+        # MultiPart/LightPart-specific stats
+        if 'parts' in all_metrics[0]['vae_info']['latent']:
             print(f"\n[Per-Part Latent Statistics]")
-            for part in model.vae.parts:
+            part_names = list(all_metrics[0]['vae_info']['latent']['parts'].keys())
+            for part in part_names:
                 part_mu = [m['vae_info']['latent']['parts'][part]['mu_mean'] for m in all_metrics]
                 part_var = [m['vae_info']['latent']['parts'][part]['var_mean'] for m in all_metrics]
                 print(f"  {part}: mu={np.mean(part_mu):.4f}±{np.std(part_mu):.4f}, var={np.mean(part_var):.4f}")
@@ -852,6 +916,8 @@ def main():
     }
     if is_multipart:
         config_summary['parts'] = list(model.vae.parts)
+    elif is_lightpart:
+        config_summary['parts'] = ['body', 'lhand', 'rhand']
     
     config_path = os.path.join(output_dir, 'config_summary.json')
     with open(config_path, 'w') as f:

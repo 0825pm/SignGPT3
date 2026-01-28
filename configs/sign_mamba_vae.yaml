@@ -1,38 +1,44 @@
-# SignGPT3 VAE Training Config (MultiPartVae - Multi-Part Continuous VAE)
-# Based on MotionGPT3's MLD VAE architecture with part-specific encoders
+# SignGPT3 Mamba VAE Training Config
+# ====================================
+#
+# Light-T2M의 Mamba 구조를 차용한 경량 VAE
+# MldVae 대비 ~2x 빠른 학습/추론 속도
+#
+# 실행: python train.py --cfg configs/sign_mamba_vae.yaml --nodebug
+#
+# 주요 변경점 (vs sign_vae.yaml):
+# - target: motGPT.archs.mamba_vae.MambaVae
+# - num_layers: 9 → 4 (Mamba가 효율적)
+# - Mamba-specific params: d_state, d_conv, expand
+#
+# Author: SignGPT3 Team
 
-NAME: SignGPT3_vae_multipart
+NAME: SignGPT3_mamba_vae
 DEBUG: False
 ACCELERATOR: 'gpu'
 NUM_NODES: 1
 DEVICE: [0]
-FOLDER: experiments
-FOLDER_EXP: experiments/signgpt3
 
-LOGGER:
-  TYPE: ['WandbLogger']
-  PROJECT: signgpt3
-  OFFLINE: True
-  SAVE_DIR: experiments/signgpt3/logs
-  VAL_EVERY_STEPS: 10
-
+# =============================================================================
+# Training
+# =============================================================================
 TRAIN:
   STAGE: vae
-  BATCH_SIZE: 128
+  NUM_WORKERS: 8
+  BATCH_SIZE: 512              # Mamba는 메모리 효율적 → 배치 증가 가능
   END_EPOCH: 2000
+  accumulate_grad_batches: 1
   RESUME: ''
   PRETRAINED: ''
   PRETRAINED_VAE: ''
-  NUM_WORKERS: 8
-  instruction_type: 'caption'
-  
+
   OPTIM:
     target: AdamW
     params:
       lr: 2e-4
       betas: [0.9, 0.99]
       weight_decay: 0.0
-  
+
   LR_SCHEDULER:
     target: CosineAnnealingLR
     params:
@@ -40,27 +46,24 @@ TRAIN:
       eta_min: 1e-6
 
 EVAL:
+  BATCH_SIZE: 64
   SPLIT: val
-  BATCH_SIZE: 32
-  NUM_WORKERS: 4
 
 TEST:
-  SPLIT: test
-  BATCH_SIZE: 32
-  SAVE_PREDICTIONS: False
   CHECKPOINTS: ''
-  REP_I: 0
-  NUM_WORKERS: 4
+  SPLIT: test
+  BATCH_SIZE: 64
+  SAVE_PREDICTIONS: false
 
 # =============================================================================
-# Dataset
+# Dataset - 3개 수어 데이터셋
 # =============================================================================
 DATASET:
   target: motGPT.data.H2S.H2SDataModule
-  JOINT_TYPE: smplx
-  NFEATS: 120
+  NFEATS: 120                   # SOKE 120-dim
+  CODE_PATH: TOKENS
   NJOINTS: 55
-  
+  JOINT_TYPE: smplx
   H2S:
     DATASET_NAME: how2sign_csl_phoenix
     ROOT: /home/user/Projects/research/SOKE/data/How2Sign
@@ -68,21 +71,18 @@ DATASET:
     PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
     MEAN_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt
     STD_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/std.pt
+    UNIT_LEN: 4
     FPS: 25
     MAX_MOTION_LEN: 300
     MIN_MOTION_LEN: 40
     MAX_TEXT_LEN: 40
-    UNIT_LEN: 4
+    PICK_ONE_TEXT: true
 
 # =============================================================================
 # Metrics
 # =============================================================================
 METRIC:
   TYPE: ['MRMetrics']
-  DIST_SYNC_ON_STEP: True
-  DIVERSITY_TIMES: 300
-  MM_NUM_TIMES: 10
-  MM_NUM_REPEATS: 30
 
 # =============================================================================
 # Loss
@@ -106,7 +106,7 @@ model:
   target: motGPT.models.motgpt.MotGPT
   params:
     lm: null
-    motion_vae: ${vae.mldvae}
+    motion_vae: ${vae.mambavae}
     stage: vae
     debug: ${DEBUG}
     task: t2m
@@ -116,42 +116,39 @@ model:
     codebook_size: 512
 
 # =============================================================================
-# VAE Config (MultiPartVae - Part-specific VAE with Cross-Attention)
+# VAE Config (MambaVae - Mamba-based Lightweight VAE)
 # =============================================================================
 vae:
-  mldvae:
-    target: motGPT.archs.multipart_vae.MultiPartVae  # ← MultiPartVae!
+  mambavae:
+    target: motGPT.archs.mamba_vae.MambaVae
     params:
-      nfeats: ${DATASET.NFEATS}          # 133
+      nfeats: ${DATASET.NFEATS}          # 120
+      latent_dim: [1, 256]               # [latent_size, latent_dim]
       
-      # Transformer settings
-      latent_dim: 256                     # 각 파트의 latent dim (모두 동일)
-      ff_size: 1024
-      num_layers: 6                       # 파트별 encoder/decoder layers
-      num_heads: 4
+      # Mamba architecture params
+      num_layers: 4                       # ★ 9 → 4 (Mamba는 더 효율적)
+      num_groups: 16                      # GroupNorm groups
+      d_state: 16                         # Mamba state dimension
+      d_conv: 4                           # Mamba conv kernel
+      expand: 2                           # Mamba expansion factor
       dropout: 0.1
+      
+      # MldVae 호환성을 위한 params (무시됨)
+      ff_size: 1024
+      num_heads: 4
+      arch: encoder_decoder
+      normalize_before: false
       activation: gelu
+      position_embedding: learned
       
-      # 3개의 독립적인 z, 각각 256 dim
-      # z_body:  (1, B, 256)
-      # z_lhand: (1, B, 256)
-      # z_rhand: (1, B, 256)
-      
-      # Cross-attention settings
-      num_cross_layers: 2                 # 파트 간 cross-attention layers
-      
-      # Loss weights (손에 더 높은 가중치)
-      body_weight: 1.0
-      lhand_weight: 2.0                   # 왼손 reconstruction 중요
-      rhand_weight: 2.0                   # 오른손 reconstruction 중요
-      
+      datatype: h2s
       ablation: ${ABLATION}
 
 # =============================================================================
-# Ablation Settings
+# Ablation Settings (MldVae 호환)
 # =============================================================================
 ABLATION:
-  VAE_TYPE: multipart                     # ← 변경
+  VAE_TYPE: mamba                         # ★ mld → mamba
   VAE_ARCH: encoder_decoder
   PE_TYPE: mld
   DIFF_PE_TYPE: mld
@@ -159,6 +156,25 @@ ABLATION:
   MLP_DIST: False
   IS_DIST: False
   PREDICT_EPSILON: True
+
+# =============================================================================
+# Logger
+# =============================================================================
+LOGGER:
+  TYPE: ['tensorboard']
+  VAL_EVERY_STEPS: 1
+  TENSORBOARD:
+    target: pytorch_lightning.loggers.TensorBoardLogger
+    params:
+      save_dir: experiments
+      name: motgpt
+      version: ${NAME}
+  WANDB:
+    target: pytorch_lightning.loggers.WandbLogger
+    params:
+      project: signgpt3
+      name: ${NAME}
+      save_dir: experiments
 
 SEED_VALUE: 1234
 FULL_CONFIG: false
