@@ -1,6 +1,6 @@
 {
-  "config_name": "SignGPT3_vae_mld",
-  "timestamp": "20260126_125728",
+  "config_name": "SignGPT3_lm_mbart_bimodal",
+  "timestamp": "20260127_112503",
   "num_samples_per_dataset_per_split": 2,
   "splits": [
     "val",
@@ -11,6 +11,6 @@
     "csl",
     "phoenix"
   ],
-  "vae_type": "MldVae (Continuous)",
+  "model_type": "LM Text-to-Motion",
   "total_samples": 12
 }
