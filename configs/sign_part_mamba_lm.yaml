@@ -1,0 +1,198 @@
+# =============================================================================
+# SignGPT3 Stage 2: Part Mamba LM (Text → Motion Latent Diffusion)
+# =============================================================================
+# 
+# Architecture:
+#   Text (EN/ZH/DE) → M-CLIP → PartMambaDenoiser → VAE Decoder → Motion
+#
+# Usage:
+#   python train.py --cfg configs/sign_part_mamba_lm.yaml --nodebug
+#
+# 복사 위치: SignGPT3/configs/sign_part_mamba_lm.yaml
+# =============================================================================
+
+NAME: SignGPT3_part_mamba_lm
+DEBUG: False
+ACCELERATOR: 'gpu'
+NUM_NODES: 1
+DEVICE: [0]
+FOLDER: experiments
+FOLDER_EXP: experiments/signgpt3
+
+# =============================================================================
+# Logger
+# =============================================================================
+LOGGER:
+  TYPE: ['WandbLogger']
+  PROJECT: signgpt3
+  OFFLINE: True
+  SAVE_DIR: experiments/signgpt3/logs
+  VAL_EVERY_STEPS: 1
+
+# =============================================================================
+# Training
+# =============================================================================
+TRAIN:
+  STAGE: lm
+  BATCH_SIZE: 64
+  END_EPOCH: 1000
+  RESUME: ''
+  PRETRAINED: ''
+  PRETRAINED_VAE: 'experiments/motgpt/SignGPT3_light_part_mamba_vae/checkpoints/last.ckpt'
+  NUM_WORKERS: 8
+  instruction_type: 'caption'
+  
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.01
+  
+  LR_SCHEDULER:
+    target: CosineAnnealingLR
+    params:
+      T_max: 1000
+      eta_min: 1e-6
+
+# =============================================================================
+# Evaluation
+# =============================================================================
+EVAL:
+  SPLIT: val
+  BATCH_SIZE: 32
+  NUM_WORKERS: 4
+
+TEST:
+  SPLIT: test
+  BATCH_SIZE: 32
+  SAVE_PREDICTIONS: False
+  CHECKPOINTS: ''
+  REP_I: 0
+  NUM_WORKERS: 4
+
+# =============================================================================
+# Dataset
+# =============================================================================
+DATASET:
+  target: motGPT.data.H2S.H2SDataModule
+  NFEATS: 120
+  CODE_PATH: TOKENS
+  NJOINTS: 55
+  JOINT_TYPE: smplx
+  H2S:
+    DATASET_NAME: how2sign_csl_phoenix
+    ROOT: /home/user/Projects/research/SOKE/data/How2Sign
+    CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
+    PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
+    MEAN_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/mean.pt
+    STD_PATH: /home/user/Projects/research/SOKE/data/CSL-Daily/std.pt
+    UNIT_LEN: 4
+    FPS: 25
+    MAX_MOTION_LEN: 300
+    MIN_MOTION_LEN: 40
+    MAX_TEXT_LEN: 40
+    PICK_ONE_TEXT: true
+
+# =============================================================================
+# Metrics
+# =============================================================================
+METRIC:
+  TYPE: ['MRMetrics']
+  DIST_SYNC_ON_STEP: True
+  DIVERSITY_TIMES: 300
+  MM_NUM_TIMES: 10
+  MM_NUM_REPEATS: 30
+
+# =============================================================================
+# Loss
+# =============================================================================
+LOSS:
+  TYPE: 'mse'
+  LAMBDA_REC: 1.0
+  LAMBDA_KL: 0.0
+  LAMBDA_LATENT: 0.0
+  ABLATION:
+    RECONS_LOSS: l1_smooth
+
+# =============================================================================
+# Model
+# =============================================================================
+model:
+  target: motGPT.models.part_mamba_lm.PartMambaLM
+  params:
+    # Diffusion
+    num_train_timesteps: 1000
+    prediction_type: sample  # Light-T2M style (predict x0)
+    beta_schedule: squaredcos_cap_v2
+    # Guidance
+    guidance_scale: 4.0
+    guidance_uncond_prob: 0.1
+    # Pretrained VAE
+    pretrained_vae: ${TRAIN.PRETRAINED_VAE}
+    # Sub-configs
+    vae_config: ${vae.light_part_mamba}
+    text_encoder_config: ${text_encoder.mclip}
+    denoiser_config: ${denoiser.part_mamba}
+
+# =============================================================================
+# VAE (frozen, from Stage 1)
+# =============================================================================
+vae:
+  light_part_mamba:
+    target: motGPT.archs.light_part_mamba_vae.LightPartMambaVae
+    params:
+      nfeats: ${DATASET.NFEATS}
+      latent_dim: [3, 256]
+      num_layers: 4
+      num_heads: 4
+      dropout: 0.1
+      d_state: 16
+      d_conv: 4
+      expand: 2
+      datatype: h2s
+      ablation: ${ABLATION}
+
+# =============================================================================
+# Text Encoder (frozen)
+# =============================================================================
+text_encoder:
+  mclip:
+    target: motGPT.archs.mclip_encoder.MCLIPEncoder
+    params:
+      model_name: sentence-transformers/clip-ViT-B-32-multilingual-v1
+      freeze: true
+
+# =============================================================================
+# Denoiser (trainable)
+# =============================================================================
+denoiser:
+  part_mamba:
+    target: motGPT.archs.part_mamba_denoiser.PartMambaDenoiser
+    params:
+      latent_dim: 256
+      text_dim: 512
+      hidden_dim: 256
+      num_layers: 4
+      num_parts: 3
+      dropout: 0.1
+      ssm_cfg:
+        d_state: 16
+        d_conv: 4
+        expand: 2
+
+# =============================================================================
+# Ablation (compatibility)
+# =============================================================================
+ABLATION:
+  VAE_TYPE: light_part_mamba
+  VAE_ARCH: encoder_decoder
+  PE_TYPE: mld
+  DIFF_PE_TYPE: mld
+  SKIP_CONNECT: True
+  MLP_DIST: False
+  IS_DIST: False
+  PREDICT_EPSILON: False  # We use sample prediction
+
+SEED_VALUE: 1234
+FULL_CONFIG: false
