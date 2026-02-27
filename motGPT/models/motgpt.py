@@ -213,22 +213,13 @@ class MotGPT(BaseModel):
 
     def train_lm_forward(self, batch):
         """LM training forward pass"""
-        motion = batch["motion"]
+        feats_ref = batch["motion"]
+        texts = batch["text"]
         lengths = batch["length"]
-        text = batch["text"]
-        
-        # Encode motion to latent
-        with torch.no_grad():
-            motion_z, _ = self.vae.encode(motion, lengths)
-        
-        # LM forward
-        outputs = self.lm(
-            motion_z=motion_z,
-            lengths=lengths,
-            text=text,
-        )
-        
-        return outputs
+        tasks = batch["tasks"]
+
+        outputs = self.lm(texts, feats_ref, self.vae, lengths, tasks)
+        return {'outputs': outputs}
 
     @torch.no_grad()
     def val_t2m_forward(self, batch):
@@ -236,40 +227,44 @@ class MotGPT(BaseModel):
         lengths = batch["length"]
         text = batch["text"]
         feats_ref = batch["motion"]
-        
-        # Generate motion from text
-        motion_z = self.lm.generate(
-            text=text,
+
+        tasks = [{
+            'class': 't2m',
+            'input': ['Generate motion: <Caption_Placeholder>'],
+            'output': ['<Motion_Placeholder>']
+        }] * len(text)
+
+        outputs = self.lm.generate_conditional(
+            text,
             lengths=lengths,
+            stage='test',
+            tasks=tasks,
         )
-        
-        # Decode to motion
-        feats_rst = self.vae.decode(motion_z, lengths)
-        
-        # Get joints and vertices
-        result_ref = self.feats2joints(feats_ref)
-        result_rst = self.feats2joints(feats_rst)
-        
-        if isinstance(result_ref, tuple):
-            vertices_ref, joints_ref = result_ref
-            vertices_rst, joints_rst = result_rst
-        else:
-            joints_ref = result_ref
-            joints_rst = result_rst
-            vertices_ref = None
-            vertices_rst = None
+        sampled_token_latents, motion_mask = self.lm.sample_tokens(
+            outputs, feats_ref.device,
+            temperature=1.0, cfg=self.hparams.guidance_scale,
+            vae_mean_std_inv=self.vae.mean_std_inv
+        )
+        sampled_token_latents = sampled_token_latents.reshape(
+            len(lengths), self.vae.latent_size, -1
+        ).permute(1, 0, 2)
+
+        feats_rst = self.vae.decode(sampled_token_latents, lengths)
+        feats_rst[motion_mask == 1] = torch.zeros_like(feats_ref[0, ...])
+
+        joints_ref = self.feats2joints(feats_ref)
+        joints_rst = self.feats2joints(feats_rst)
+
+        feats_ref = self.datamodule.renorm4t2m(feats_ref)
+        feats_rst = self.datamodule.renorm4t2m(feats_rst)
 
         rs_set = {
             "m_ref": feats_ref,
             "m_rst": feats_rst,
             "joints_ref": joints_ref,
             "joints_rst": joints_rst,
-            "vertices_ref": vertices_ref,
-            "vertices_rst": vertices_rst,
             "length": lengths,
-            "lengths_rst": lengths,
         }
-
         return rs_set
 
     @torch.no_grad()
@@ -383,7 +378,7 @@ class MotGPT(BaseModel):
 
             # ---- Visualization ----
             if self.hparams.stage == "vae" and self.hparams.task not in ["m2t"]:
-                if (self.current_epoch + 1) % 20 == 0 and batch_idx == 0 and self.global_rank == 0:
+                if (self.current_epoch + 1) % 99999 == 0 and batch_idx == 0 and self.global_rank == 0:
                     self._visualize_validation(batch, rs_set)
 
         return loss

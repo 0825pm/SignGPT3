@@ -269,6 +269,10 @@ class MLM(nn.Module):
                 assert False, f'not Implemented fake_latent_mode {fake_latent_mode}, should in \[learnable_zero, all_zero, learnable_rand]'
         # torch.nn.init.normal_(self.fake_latent, std=.02)
 
+        # Fallback: always ensure fake_latent exists for sample_tokens(cfg>1.0)
+        if not hasattr(self, 'fake_latent'):
+            self.fake_latent = nn.Parameter(torch.zeros(self.motion_holder_repeat, self.llm_decoder_embed_dim))
+
         # Lora
         if lora:
             from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict

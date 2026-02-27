@@ -22,7 +22,11 @@ from transformers.cache_utils import StaticCache, Cache
 from transformers.generation.configuration_utils import GenerationConfig
 # from transformers.generation.streamers import BaseStreamer
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
-from transformers.utils import is_torchdynamo_compiling
+try:
+    from transformers.utils import is_torchdynamo_compiling
+except ImportError:
+    def is_torchdynamo_compiling():
+        return False
 
 from .my_modeling_mot_gpt2_sepattn import MoTGPT2Model
 from .modality_utils_sepattn import get_modalities_infos

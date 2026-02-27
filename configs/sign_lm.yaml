@@ -1,44 +1,65 @@
-# SignGPT3 VAE Training Config (MldVae - Continuous VAE)
-# Based on MotionGPT3's MLD VAE architecture
+# =============================================================================
+# SignGPT3 LM Training Config (Text → Motion Generation)
+# =============================================================================
+#
+# Architecture:
+#   Text → GPT2 (Text Branch) ←shared attn→ Motion Branch → Diffusion → z
+#   z → VAE Decoder → Motion [B, T, 120]
+#
+# Prerequisites:
+#   1. Trained VAE checkpoint (from sign_vae.yaml)
+#   2. GPT2 model in deps/mot-gpt2/
+#
+# Usage:
+#   python train.py --cfg configs/sign_lm.yaml --nodebug \
+#     TRAIN.PRETRAINED_VAE=experiments/motgpt/SignGPT3_vae_mld_phoenix/checkpoints/last.ckpt
+#
+# =============================================================================
 
-NAME: SignGPT3_vae_mld_phoenix
+NAME: SignGPT3_lm_phoenix
 DEBUG: False
 ACCELERATOR: 'gpu'
 NUM_NODES: 1
 DEVICE: [0]
 FOLDER: experiments
-FOLDER_EXP: experiments/signgpt3
+FOLDER_EXP: experiments/motgpt
 
+# =============================================================================
+# Logger
+# =============================================================================
 LOGGER:
-  TYPE: ['WandbLogger']
-  PROJECT: signgpt3
-  OFFLINE: True
-  SAVE_DIR: experiments/signgpt3/logs
-  VAL_EVERY_STEPS: 10
+  TYPE: ['tensorboard']
+  VAL_EVERY_STEPS: 1
 
+# =============================================================================
+# Training
+# =============================================================================
 TRAIN:
-  STAGE: vae
-  BATCH_SIZE: 128
-  END_EPOCH: 2000
+  STAGE: lm_pretrain
+  BATCH_SIZE: 64
+  END_EPOCH: 1000
   RESUME: ''
   PRETRAINED: ''
-  PRETRAINED_VAE: ''
+  PRETRAINED_VAE: 'experiments/motgpt/SignGPT3_vae_mld_phoenix/checkpoints/last.ckpt'
   NUM_WORKERS: 8
   instruction_type: 'caption'
-  
+
   OPTIM:
     target: AdamW
     params:
-      lr: 2e-4
+      lr: 1e-4
       betas: [0.9, 0.99]
-      weight_decay: 0.0
-  
+      weight_decay: 0.01
+
   LR_SCHEDULER:
     target: CosineAnnealingLR
     params:
-      T_max: 2000
+      T_max: 1000
       eta_min: 1e-6
 
+# =============================================================================
+# Evaluation
+# =============================================================================
 EVAL:
   SPLIT: val
   BATCH_SIZE: 32
@@ -53,17 +74,16 @@ TEST:
   NUM_WORKERS: 4
 
 # =============================================================================
-# Dataset
+# Dataset (Phoenix only)
 # =============================================================================
 DATASET:
   target: motGPT.data.H2S.H2SDataModule
   JOINT_TYPE: smplx
   NFEATS: 120
   NJOINTS: 55
-  
+
   H2S:
-    DATASET_NAME: how2sign_csl_phoenix
-    # DATASET_NAME: phoenix
+    DATASET_NAME: phoenix
     ROOT: /home/user/Projects/research/SOKE/data/How2Sign
     CSL_ROOT: /home/user/Projects/research/SOKE/data/CSL-Daily
     PHOENIX_ROOT: /home/user/Projects/research/SOKE/data/Phoenix_2014T
@@ -74,6 +94,7 @@ DATASET:
     MIN_MOTION_LEN: 40
     MAX_TEXT_LEN: 40
     UNIT_LEN: 4
+    PICK_ONE_TEXT: true
 
 # =============================================================================
 # Metrics
@@ -95,8 +116,8 @@ LOSS:
   LAMBDA_KL: 1e-5
   LAMBDA_LATENT: 1e-5
   LAMBDA_COMMIT: 0.02
-  LAMBDA_CLS: 1.0
-  LAMBDA_DIFF: 1.0
+  LAMBDA_CLS: 0.0          # GPT text loss (Stage 1에서는 0)
+  LAMBDA_DIFF: 1.0          # Diffusion loss (핵심)
   ABLATION:
     RECONS_LOSS: l1_smooth
 
@@ -106,25 +127,25 @@ LOSS:
 model:
   target: motGPT.models.motgpt.MotGPT
   params:
-    lm: null
+    lm: ${lm.mot_vae_gpt2}
     motion_vae: ${vae.mldvae}
-    stage: vae
+    stage: lm_pretrain
     debug: ${DEBUG}
     task: t2m
     condition: text
     metrics_dict: ${METRIC.TYPE}
-    guidance_scale: 1.0
+    guidance_scale: 3.0
     codebook_size: 512
 
 # =============================================================================
-# VAE Config (MldVae - Continuous VAE)
+# VAE (frozen, loaded from PRETRAINED_VAE)
 # =============================================================================
 vae:
   mldvae:
-    target: motGPT.archs.mld_vae.MldVae  # ← 올바른 경로
+    target: motGPT.archs.mld_vae.MldVae
     params:
-      nfeats: ${DATASET.NFEATS}          # 133
-      latent_dim: [1, 256]               # ← 리스트 형식!
+      nfeats: ${DATASET.NFEATS}
+      latent_dim: [1, 256]
       ff_size: 1024
       num_layers: 9
       num_heads: 4
@@ -134,19 +155,36 @@ vae:
       normalize_before: false
       position_embedding: learned
       code_num: 512
-      datatype: h2s                       # Sign language
-      ablation: ${ABLATION}               # ← ablation 전달
+      datatype: h2s
+      ablation: ${ABLATION}
 
 # =============================================================================
-# Ablation Settings (MldVae에 필요)
+# Language Model (GPT2 + Diffusion Head)
+# =============================================================================
+lm:
+  mot_vae_gpt2:
+    target: motGPT.archs.motgpt_lm.MLM
+    params:
+      model_type: gpt2
+      model_path: deps/mot-gpt2
+      stage: lm_pretrain
+      motion_holder_repeat: 4
+      holder_num_in_input: 4
+      diffusion_steps: 100
+      guidance_scale: 3.0
+      fake_latent_mode: 'learnable_zero'    # ← 추가
+      guidance_uncondp: 0.1                  # ← CFG dropout
+
+# =============================================================================
+# Ablation Settings
 # =============================================================================
 ABLATION:
   VAE_TYPE: mld
   VAE_ARCH: encoder_decoder
   PE_TYPE: mld
   DIFF_PE_TYPE: mld
-  SKIP_CONNECT: True      # ← Skip connection 활성화
-  MLP_DIST: False         # ← Linear layer for distribution
+  SKIP_CONNECT: True
+  MLP_DIST: False
   IS_DIST: False
   PREDICT_EPSILON: True
 

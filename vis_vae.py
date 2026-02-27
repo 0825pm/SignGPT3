@@ -1,765 +1,428 @@
 """
-SignGPT3 VAE Reconstruction Visualization
-For MotionGPT3's Continuous MldVae (not VQ-VAE)
+vis_vae.py — SignGPT3 VAE Reconstruction 시각화
 
-Features:
-- Supports all splits: train, val, test
-- Supports all datasets: how2sign, csl, phoenix
-- Continuous VAE (MldVae) with KL divergence
-- Multiple visualization modes: 2-panel, 3-view
-- Detailed metrics with JSON export
+원본: sign-t2m vis_vae.py
+변경: 모델 로딩(MotGPT), VAE forward(encode+decode), import 경로(motGPT.*), dataset 반환형식(tuple)
 
 Usage:
-    # Basic usage (default: 2 samples per dataset per split)
-    python vis_vae.py --cfg configs/sign_vae.yaml --output vis_output --nodebug
+    cd ~/Projects/research/SignGPT3
 
-    # Custom options
-    python vis_vae.py --cfg configs/sign_vae.yaml --output vis_output \\
-        --num_samples 3 --splits val,test --datasets how2sign,csl
+    python vis_vae.py \
+        --cfg configs/sign_vae.yaml \
+        --ckpt experiments/.../checkpoints/last.ckpt \
+        --num_samples 10
 
-    # Custom checkpoint
-    python vis_vae.py --cfg configs/sign_vae.yaml --checkpoint path/to/ckpt.ckpt
-
-    # 3-view videos (front, side, top)
-    python vis_vae.py --cfg configs/sign_vae.yaml --three_view
+    # Phoenix만
+    python vis_vae.py \
+        --cfg configs/sign_vae.yaml \
+        --ckpt experiments/.../last.ckpt \
+        --dataset phoenix --viewport 0
 """
 
 import os
 import sys
 import argparse
-import json
 import numpy as np
 import torch
-import pytorch_lightning as pl
-from tqdm import tqdm
 from datetime import datetime
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 
-
-# =============================================================================
-# SOKE 133 dims format constants
-# =============================================================================
-SOKE_BODY_DIM = 30      # upper body (10 joints × 3)
-SOKE_LHAND_DIM = 45     # left hand (15 joints × 3)
-SOKE_RHAND_DIM = 45     # right hand (15 joints × 3)
-SOKE_JAW_DIM = 3        # jaw (1 joint × 3)
-SOKE_EXPR_DIM = 10      # expression
-SOKE_TOTAL_DIM = 133
-POSE_SCALE = 2.0
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 # =============================================================================
-# Skeleton Visualization Utilities
+# Constants (원본 그대로)
+# =============================================================================
+SMPLX_UPPER_BODY = [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+SMPLX_LHAND = list(range(25, 40))
+SMPLX_RHAND = list(range(40, 55))
+SMPLX_VALID = SMPLX_UPPER_BODY + SMPLX_LHAND + SMPLX_RHAND
+
+# 44 joints → SMPLX 55 index mapping
+JOINT44_TO_SMPLX55 = (
+    [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    + list(range(25, 40))
+    + list(range(40, 55))
+)
+
+
+# =============================================================================
+# Skeleton Visualization (원본 그대로)
 # =============================================================================
 
-def get_connections(num_joints):
-    """Get skeleton connections for upper body + hands."""
+def get_connections():
     upper_body = [
         (0, 3), (3, 6), (6, 9), (9, 12), (12, 15),
         (9, 13), (13, 16), (16, 18), (18, 20),
         (9, 14), (14, 17), (17, 19), (19, 21),
     ]
-    
     hand_connections = []
-    if num_joints >= 55:
-        for finger in range(5):
-            base = 25 + finger * 3
-            if base + 2 < num_joints:
-                hand_connections.extend([
-                    (20, base), (base, base + 1), (base + 1, base + 2)
-                ])
-        for finger in range(5):
-            base = 40 + finger * 3
-            if base + 2 < num_joints:
-                hand_connections.extend([
-                    (21, base), (base, base + 1), (base + 1, base + 2)
-                ])
-    
-    all_connections = upper_body + hand_connections
-    return [(i, j) for i, j in all_connections if i < num_joints and j < num_joints]
+    for finger in range(5):
+        base = 25 + finger * 3
+        hand_connections.extend([(20, base), (base, base + 1), (base + 1, base + 2)])
+    for finger in range(5):
+        base = 40 + finger * 3
+        hand_connections.extend([(21, base), (base, base + 1), (base + 1, base + 2)])
+    return upper_body + hand_connections
 
 
-def normalize_to_root(joints, root_idx=9):
-    """Normalize joints relative to root joint."""
+def normalize_to_root(joints, root_idx=9, flip_y=True):
     if len(joints.shape) == 3:
-        root = joints[:, root_idx:root_idx+1, :]
+        root = joints[:, root_idx:root_idx + 1, :]
     else:
-        root = joints[root_idx:root_idx+1, :]
-    return joints - root
+        root = joints[root_idx:root_idx + 1, :]
+    out = joints - root
+    if flip_y:
+        out[..., 1] *= -1
+    return out
 
 
-def get_joint_colors():
-    return {'body': 'blue', 'lhand': 'red', 'rhand': 'green'}
+def _setup_ax(ax, label, color, x_lim, y_lim):
+    ax.set_title(label, fontsize=12, fontweight='bold', color=color)
+    ax.set_xlim(x_lim)
+    ax.set_ylim(y_lim)
+    ax.set_aspect('equal')
+    ax.axis('off')
 
 
-# =============================================================================
-# Video Saving Functions
-# =============================================================================
+def _build_elements(ax, J, connections, colors):
+    ub_idx = [i for i in SMPLX_UPPER_BODY if i < J]
+    lines = []
+    for (i, j) in connections:
+        if i >= J or j >= J:
+            continue
+        if i >= 40 or j >= 40:
+            c, lw = colors['rhand'], 1.0
+        elif i >= 25 or j >= 25:
+            c, lw = colors['lhand'], 1.0
+        else:
+            c, lw = colors['body'], 1.5
+        line, = ax.plot([], [], color=c, linewidth=lw, alpha=0.8)
+        lines.append((line, i, j))
+    bs = ax.scatter([], [], c=colors['body'], s=10, zorder=5)
+    ls = ax.scatter([], [], c=colors['lhand'], s=5, zorder=5)
+    rs = ax.scatter([], [], c=colors['rhand'], s=5, zorder=5)
+    return lines, bs, ls, rs, ub_idx
 
-def save_comparison_video(gt_joints, recon_joints, save_path, title='', fps=20):
-    """Save GT vs Reconstruction comparison video (2-panel)."""
-    seqs = [gt_joints, recon_joints]
-    panel_titles = ['Ground Truth', 'Reconstruction']
-    
-    T = min(seq.shape[0] for seq in seqs)
-    J = gt_joints.shape[1]
-    
+
+def save_comparison_video(left_joints, right_joints, save_path,
+                          title='', fps=25, viewport=0.5,
+                          left_label='GT', right_label='Reconstructed',
+                          flip_y=True):
+    T = min(left_joints.shape[0], right_joints.shape[0])
+    J = min(left_joints.shape[1], right_joints.shape[1])
+
     root_idx = 9 if J > 21 else 0
-    normalized_seqs = [normalize_to_root(seq.copy(), root_idx) for seq in seqs]
-    
-    all_joints = np.concatenate(normalized_seqs, axis=0)
-    
-    if J >= 55:
-        upper_body_idx = [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
-        hand_idx = list(range(25, min(55, J)))
-        valid_idx = upper_body_idx + hand_idx
+    left = normalize_to_root(left_joints[:T, :J].copy(), root_idx, flip_y=flip_y)
+    right = normalize_to_root(right_joints[:T, :J].copy(), root_idx, flip_y=flip_y)
+
+    valid_idx = [i for i in SMPLX_VALID if i < J]
+
+    if viewport > 0:
+        x_lim = (-viewport, viewport)
+        y_lim = (-viewport, viewport)
     else:
-        valid_idx = list(range(min(22, J)))
-    
-    all_x = all_joints[:, valid_idx, 0].flatten()
-    all_y = all_joints[:, valid_idx, 1].flatten()
-    
-    x_min, x_max = all_x.min(), all_x.max()
-    y_min, y_max = all_y.min(), all_y.max()
-    
-    max_range = max(x_max - x_min, y_max - y_min) * 1.2
-    x_mid = (x_max + x_min) / 2
-    y_mid = (y_max + y_min) / 2
-    
-    x_lim = (x_mid - max_range/2, x_mid + max_range/2)
-    y_lim = (y_mid - max_range/2, y_mid + max_range/2)
-    
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    
-    if title:
-        fig.suptitle(title, fontsize=10)
-    
-    for ax, panel_title in zip(axes, panel_titles):
-        ax.set_xlim(x_lim)
-        ax.set_ylim(y_lim)
-        ax.set_aspect('equal')
-        ax.axis('off')
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-    
-    connections = get_connections(J)
-    colors = get_joint_colors()
-    
-    all_lines = []
-    all_scatters = []
-    
-    for ax in axes:
-        lines = []
-        for (i, j) in connections:
-            if i >= 40 or j >= 40:
-                color = colors['rhand']
-                lw = 1.0
-            elif i >= 25 or j >= 25:
-                color = colors['lhand']
-                lw = 1.0
-            else:
-                color = colors['body']
-                lw = 1.5
-            line, = ax.plot([], [], color=color, linewidth=lw, alpha=0.8)
-            lines.append((line, i, j))
-        all_lines.append(lines)
-        
-        body_scatter = ax.scatter([], [], c=colors['body'], s=10, zorder=5)
-        lhand_scatter = ax.scatter([], [], c=colors['lhand'], s=5, zorder=5)
-        rhand_scatter = ax.scatter([], [], c=colors['rhand'], s=5, zorder=5)
-        all_scatters.append((body_scatter, lhand_scatter, rhand_scatter))
-    
-    plt.tight_layout()
-    
-    upper_body_idx = [i for i in [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] if i < J]
-    
-    def update(frame):
-        for panel_idx, (seq, lines, scatters) in enumerate(zip(normalized_seqs, all_lines, all_scatters)):
-            frame_data = seq[min(frame, len(seq)-1)]
-            x, y = frame_data[:, 0], frame_data[:, 1]
-            
-            for (line, i, j) in lines:
-                line.set_data([x[i], x[j]], [y[i], y[j]])
-            
-            body_scatter, lhand_scatter, rhand_scatter = scatters
-            body_scatter.set_offsets(np.c_[x[upper_body_idx], y[upper_body_idx]])
-            
-            if J > 25:
-                lhand_scatter.set_offsets(np.c_[x[25:40], y[25:40]])
-            if J > 40:
-                rhand_scatter.set_offsets(np.c_[x[40:55], y[40:55]])
-        return []
-    
-    anim = FuncAnimation(fig, update, frames=T, interval=1000/fps, blit=False)
-    
-    try:
-        writer = FFMpegWriter(fps=fps, bitrate=2000)
-        anim.save(save_path, writer=writer)
-    except Exception as e:
-        print(f"    FFMpeg error: {e}, trying GIF...")
-        gif_path = save_path.replace('.mp4', '.gif')
-        anim.save(gif_path, writer='pillow', fps=min(fps, 10))
-    
-    plt.close(fig)
-
-
-def save_three_view_video(gt_joints, recon_joints, save_path, title='', fps=20):
-    """Save 3-view (front, side, top) comparison video."""
-    T = min(gt_joints.shape[0], recon_joints.shape[0])
-    J = gt_joints.shape[1]
-    
-    root_idx = 9 if J > 21 else 0
-    gt_norm = normalize_to_root(gt_joints.copy(), root_idx)
-    recon_norm = normalize_to_root(recon_joints.copy(), root_idx)
-    
-    views = [('Front', 0, 1), ('Side', 2, 1), ('Top', 0, 2)]
-    
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    
-    if title:
-        fig.suptitle(title, fontsize=11)
-    
-    bounds = {}
-    for view_name, xi, yi in views:
-        all_data = np.concatenate([gt_norm, recon_norm], axis=0)
-        all_x = all_data[:, :, xi].flatten()
-        all_y = all_data[:, :, yi].flatten()
-        max_range = max(all_x.max() - all_x.min(), all_y.max() - all_y.min()) * 1.2
+        all_data = np.concatenate([left[:, valid_idx], right[:, valid_idx]], axis=0)
+        all_x, all_y = all_data[:, :, 0].flatten(), all_data[:, :, 1].flatten()
+        max_range = max(all_x.max() - all_x.min(), all_y.max() - all_y.min(), 0.1) * 1.2
         x_mid = (all_x.max() + all_x.min()) / 2
         y_mid = (all_y.max() + all_y.min()) / 2
-        bounds[view_name] = {
-            'xlim': (x_mid - max_range/2, x_mid + max_range/2),
-            'ylim': (y_mid - max_range/2, y_mid + max_range/2),
-        }
-    
-    connections = get_connections(J)
-    row_titles = ['Ground Truth', 'Reconstruction']
-    all_elements = []
-    
-    for row, (seq, row_title) in enumerate(zip([gt_norm, recon_norm], row_titles)):
-        for col, (view_name, xi, yi) in enumerate(views):
-            ax = axes[row, col]
-            b = bounds[view_name]
-            ax.set_xlim(b['xlim'])
-            ax.set_ylim(b['ylim'])
-            ax.set_aspect('equal')
-            ax.axis('off')
-            
-            if row == 0:
-                ax.set_title(view_name, fontsize=10, fontweight='bold')
-            if col == 0:
-                ax.text(-0.15, 0.5, row_title, transform=ax.transAxes,
-                       fontsize=10, fontweight='bold', rotation=90, va='center')
-            
-            lines = []
-            for (i, j) in connections:
-                if i >= 40 or j >= 40:
-                    color = 'green'
-                elif i >= 25 or j >= 25:
-                    color = 'red'
-                else:
-                    color = 'blue'
-                line, = ax.plot([], [], color=color, linewidth=1.2, alpha=0.8)
-                lines.append((line, i, j))
-            
-            scatter = ax.scatter([], [], c='black', s=5, zorder=5)
-            all_elements.append((seq, lines, scatter, xi, yi))
-    
-    plt.tight_layout()
-    
+        x_lim = (x_mid - max_range / 2, x_mid + max_range / 2)
+        y_lim = (y_mid - max_range / 2, y_mid + max_range / 2)
+
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(12, 6))
+    fig.suptitle(title, fontsize=10)
+
+    _setup_ax(ax_l, left_label, 'blue', x_lim, y_lim)
+    _setup_ax(ax_r, right_label, 'red', x_lim, y_lim)
+
+    connections = get_connections()
+    colors_l = {'body': 'black', 'lhand': 'red', 'rhand': 'green'}
+    colors_r = {'body': 'black', 'lhand': 'red', 'rhand': 'green'}
+
+    el_l = _build_elements(ax_l, J, connections, colors_l)
+    el_r = _build_elements(ax_r, J, connections, colors_r)
+
+    frame_text = fig.text(0.5, 0.02, '', ha='center', fontsize=9, color='gray')
+    plt.tight_layout(rect=[0, 0.04, 1, 0.93])
+
     def update(frame):
-        for (seq, lines, scatter, xi, yi) in all_elements:
-            frame_data = seq[min(frame, len(seq)-1)]
-            x, y = frame_data[:, xi], frame_data[:, yi]
-            
+        f = min(frame, T - 1)
+        frame_text.set_text(f'Frame {f}/{T - 1}')
+        for (lines, bs, ls, rs, ub_idx), data in [(el_l, left), (el_r, right)]:
+            fd = data[f]
+            x, y = fd[:, 0], fd[:, 1]
             for (line, i, j) in lines:
                 line.set_data([x[i], x[j]], [y[i], y[j]])
-            
-            scatter.set_offsets(np.c_[x, y])
+            bs.set_offsets(np.c_[x[ub_idx], y[ub_idx]])
+            if J > 25:
+                ls.set_offsets(np.c_[x[25:min(40, J)], y[25:min(40, J)]])
+            if J > 40:
+                rs.set_offsets(np.c_[x[40:min(55, J)], y[40:min(55, J)]])
         return []
-    
-    anim = FuncAnimation(fig, update, frames=T, interval=1000/fps, blit=False)
-    
+
+    anim = FuncAnimation(fig, update, frames=T, interval=1000 / fps, blit=False)
     try:
-        writer = FFMpegWriter(fps=fps, bitrate=3000)
-        anim.save(save_path, writer=writer)
+        anim.save(save_path, writer=FFMpegWriter(fps=fps, bitrate=5000))
     except Exception:
         anim.save(save_path.replace('.mp4', '.gif'), writer='pillow', fps=min(fps, 10))
-    
     plt.close(fig)
 
 
 # =============================================================================
-# Metrics Computation
+# 528D / 120D → Joint positions (원본 그대로)
 # =============================================================================
 
-def compute_metrics(gt_feats, recon_feats, gt_joints=None, recon_joints=None):
-    """Compute reconstruction metrics."""
-    metrics = {}
-    
-    # Feature space metrics
-    metrics['feat_mse'] = float(((gt_feats - recon_feats) ** 2).mean())
-    metrics['feat_rmse'] = float(np.sqrt(metrics['feat_mse']))
-    metrics['feat_l1'] = float(np.abs(gt_feats - recon_feats).mean())
-    
-    # Joint space metrics
-    if gt_joints is not None and recon_joints is not None:
-        min_len = min(len(gt_joints), len(recon_joints))
-        gt_j = gt_joints[:min_len]
-        recon_j = recon_joints[:min_len]
-        
-        diff = gt_j - recon_j
-        dist = np.sqrt((diff ** 2).sum(axis=-1))
-        metrics['mpjpe'] = float(dist.mean())
-        
-        J = gt_j.shape[1]
-        if J >= 55:
-            body_idx = [0, 3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
-            metrics['mpjpe_body'] = float(dist[:, body_idx].mean())
-            metrics['mpjpe_lhand'] = float(dist[:, 25:40].mean())
-            metrics['mpjpe_rhand'] = float(dist[:, 40:55].mean())
-        
-        gt_vel = np.diff(gt_j, axis=0)
-        recon_vel = np.diff(recon_j, axis=0)
-        metrics['vel_error'] = float(np.abs(gt_vel - recon_vel).mean())
-        
-        gt_vel_mag = np.abs(gt_vel).mean()
-        recon_vel_mag = np.abs(recon_vel).mean()
-        metrics['vel_ratio'] = float(recon_vel_mag / (gt_vel_mag + 1e-8))
-    
-    return metrics
+def feats528_to_joints55(features_np, mean_np=None, std_np=None):
+    T = features_np.shape[0]
+    if mean_np is not None and std_np is not None:
+        features_np = features_np * (std_np + 1e-10) + mean_np
+    pos_44 = features_np[:, :132].reshape(T, 44, 3)
+    joints = np.zeros((T, 55, 3), dtype=np.float32)
+    for local_idx, smplx_idx in enumerate(JOINT44_TO_SMPLX55):
+        joints[:, smplx_idx, :] = pos_44[:, local_idx, :]
+    return joints
+
+
+def feats120_to_joints55(features_np):
+    T, D = features_np.shape
+    joints = np.zeros((T, 55, 3), dtype=np.float32)
+    if D >= 120:
+        joints[:, 12:22, :] = features_np[:, 0:30].reshape(T, 10, 3)
+        joints[:, 25:40, :] = features_np[:, 30:75].reshape(T, 15, 3)
+        joints[:, 40:55, :] = features_np[:, 75:120].reshape(T, 15, 3)
+    return joints
 
 
 # =============================================================================
-# VAE Forward Functions (MldVae - Continuous VAE)
+# Model Loading — [변경] SignGPT3 (MotGPT)
 # =============================================================================
 
-def mldvae_forward(model, feats_ref, length):
-    """
-    Forward pass through MldVae (Continuous VAE).
-    
-    MldVae uses:
-    - encode(features, lengths) → (z, dist)
-    - decode(z, lengths) → features
-    
-    Returns:
-        feats_pred: reconstructed features
-        vae_info: dict with mu, var statistics
-    """
-    # Encode
-    z, dist = model.vae.encode(feats_ref[:, :length], [length])
-    
-    # Decode
-    feats_pred = model.vae.decode(z, [length])
-    
-    # Get distribution info
-    vae_info = {
-        'latent': {
-            'mu_mean': float(dist.loc.mean().item()),
-            'mu_std': float(dist.loc.std().item()),
-            'var_mean': float(dist.scale.mean().item()),
-            'var_std': float(dist.scale.std().item()),
-            'z_norm': float(z.norm().item()),
-        }
-    }
-    
-    return feats_pred, vae_info
+def load_vae_model(ckpt_path, cfg, device):
+    """Load MotGPT VAE from SignGPT3 checkpoint."""
+    from motGPT.data.build_data import build_data
+    from motGPT.models.build_model import build_model
+
+    print(f"  Loading: {ckpt_path}")
+
+    datamodule = build_data(cfg, phase="test")
+    datamodule.setup(stage='fit')
+    model = build_model(cfg, datamodule)
+
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    state_dict = ckpt.get('state_dict', ckpt)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval().to(device)
+
+    nfeats = datamodule.nfeats
+    n_params = sum(p.numel() for p in model.vae.parameters())
+    epoch = ckpt.get('epoch', '?')
+    step = ckpt.get('global_step', '?')
+    vae_type = type(model.vae).__name__
+    print(f"  {vae_type}: {n_params / 1e6:.2f}M, nfeats={nfeats}, epoch={epoch}, step={step}")
+
+    return model, nfeats, datamodule
 
 
 # =============================================================================
-# Dataset Source Detection
-# =============================================================================
-
-def normalize_source_name(src):
-    """Normalize dataset source name."""
-    src_lower = src.lower() if src else 'unknown'
-    
-    if 'how2sign' in src_lower or 'h2s' in src_lower:
-        return 'how2sign'
-    elif 'csl' in src_lower:
-        return 'csl'
-    elif 'phoenix' in src_lower:
-        return 'phoenix'
-    else:
-        return src_lower
-
-
-# =============================================================================
-# Main Visualization Function
+# Main
 # =============================================================================
 
 def main():
-    # =========================
-    # Parse Arguments
-    # =========================
-    parser = argparse.ArgumentParser(
-        description='SignGPT3 VAE Reconstruction Visualization',
-        add_help=False
-    )
-    parser.add_argument('--num_samples', type=int, default=2,
-                       help='Number of samples per dataset per split (default: 2)')
-    parser.add_argument('--output', type=str, default='vis_output',
-                       help='Output directory (default: vis_output)')
-    parser.add_argument('--fps', type=int, default=25,
-                       help='Video FPS (default: 25)')
-    parser.add_argument('--three_view', action='store_true',
-                       help='Generate 3-view videos instead of 2-panel')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                       help='Override checkpoint path')
-    parser.add_argument('--splits', type=str, default='val,test',
-                       help='Comma-separated splits to process (default: val,test)')
-    parser.add_argument('--datasets', type=str, default='how2sign,csl,phoenix',
-                       help='Comma-separated datasets (default: how2sign,csl,phoenix)')
-    parser.add_argument('--no_video', action='store_true',
-                       help='Skip video generation (metrics only)')
-    parser.add_argument('--gpu', type=int, default=0,
-                       help='GPU device ID (default: 0)')
-    
-    custom_args, remaining = parser.parse_known_args()
-    
-    # Set CUDA device
-    if custom_args.gpu is not None:
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(custom_args.gpu)
-    
-    # Replace sys.argv for motGPT's parse_args
-    sys.argv = [sys.argv[0]] + remaining
-    
-    # Import motGPT modules (SignGPT3)
-    from motGPT.config import parse_args
-    from motGPT.data.build_data import build_data
-    from motGPT.models.build_model import build_model
-    from motGPT.utils.load_checkpoint import load_pretrained_vae
-    
-    # Parse config
-    cfg = parse_args(phase="test")
-    
-    # Create output directory
+    parser = argparse.ArgumentParser(description='SignGPT3 VAE Reconstruction Visualization')
+    parser.add_argument('--ckpt', required=True)
+    parser.add_argument('--cfg', required=True, help='SignGPT3 config yaml')
+    # Dataset
+    parser.add_argument('--dataset', default=None,
+                        help='Override dataset (phoenix/csl/how2sign/how2sign_csl_phoenix)')
+    parser.add_argument('--split', default='val')
+    parser.add_argument('--num_samples', type=int, default=10)
+    # Vis
+    parser.add_argument('--fps', type=int, default=25)
+    parser.add_argument('--viewport', type=float, default=0.5,
+                        help='fixed viewport (0=auto)')
+    parser.add_argument('--output', default='vis_vae_output')
+    parser.add_argument('--device', default='cuda:0')
+    args = parser.parse_args()
+
+    dev_str = f'cuda:{args.device}' if args.device.isdigit() else args.device
+    device = torch.device(dev_str if torch.cuda.is_available() else 'cpu')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = custom_args.output
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Set seed
-    seed = cfg.SEED_VALUE if hasattr(cfg, 'SEED_VALUE') else 42
-    pl.seed_everything(seed)
-    
-    # Parse splits and datasets
-    splits_to_process = [s.strip() for s in custom_args.splits.split(',')]
-    datasets_to_process = [d.strip().lower() for d in custom_args.datasets.split(',')]
-    
-    # =========================
-    # Print Configuration
-    # =========================
-    print(f"\n{'='*70}")
+    output_root = os.path.join(args.output, f'vae_{timestamp}')
+    os.makedirs(output_root, exist_ok=True)
+
+    print("=" * 60)
     print("SignGPT3 VAE Reconstruction Visualization")
-    print(f"{'='*70}")
-    print(f"Config: {cfg.NAME if hasattr(cfg, 'NAME') else 'Unknown'}")
-    print(f"Output: {output_dir}")
-    print(f"Samples per dataset per split: {custom_args.num_samples}")
-    print(f"Splits: {splits_to_process}")
-    print(f"Datasets: {datasets_to_process}")
-    print(f"Video mode: {'3-view' if custom_args.three_view else '2-panel'}")
-    print(f"FPS: {custom_args.fps}")
-    
-    # =========================
-    # Build DataModule
-    # =========================
-    print("\n[1/3] Loading datamodule...")
-    datamodule = build_data(cfg, phase="test")
-    datamodule.setup(stage='test')
-    
-    # =========================
-    # Build Model
-    # =========================
-    print("[2/3] Loading model...")
-    model = build_model(cfg, datamodule)
-    
-    # Check CUDA
-    if not torch.cuda.is_available():
-        print("WARNING: CUDA not available, using CPU")
-        device = torch.device('cpu')
+    print("=" * 60)
+
+    # =========================================================================
+    # 1. Load Model — [변경] parse_args + build_model
+    # =========================================================================
+    print("\n[1/3] Loading VAE...")
+
+    sys.argv = [sys.argv[0], '--cfg', args.cfg, '--nodebug']
+    from motGPT.config import parse_args
+    cfg = parse_args(phase="test")
+
+    if args.dataset:
+        cfg.DATASET.H2S.DATASET_NAME = args.dataset
+
+    model, nfeats, datamodule = load_vae_model(args.ckpt, cfg, device)
+
+    # =========================================================================
+    # 2. Load normalization stats — [변경] datamodule에서 가져옴
+    # =========================================================================
+    print("\n[2/3] Loading data...")
+    D = nfeats
+
+    mean = datamodule.mean
+    std = datamodule.std
+
+    print(f"  nfeats={D}, mean shape: {mean.shape}")
+
+    # =========================================================================
+    # 3. Load dataset — [변경] motGPT import + tuple 반환
+    # =========================================================================
+    from motGPT.data.signlang.dataset_sign import SignMotionDataset
+
+    dataset_name = args.dataset or cfg.DATASET.H2S.DATASET_NAME
+    dataset = SignMotionDataset(
+        data_root=cfg.DATASET.H2S.ROOT,
+        split=args.split,
+        mean=mean,
+        std=std,
+        dataset_name=dataset_name,
+        max_motion_length=cfg.DATASET.H2S.get('MAX_MOTION_LEN', 300),
+        min_motion_length=cfg.DATASET.H2S.get('MIN_MOTION_LEN', 40),
+        unit_length=cfg.DATASET.H2S.get('UNIT_LEN', 4),
+        csl_root=cfg.DATASET.H2S.get('CSL_ROOT', None),
+        phoenix_root=cfg.DATASET.H2S.get('PHOENIX_ROOT', None),
+    )
+
+    n = min(args.num_samples, len(dataset))
+    indices = np.linspace(0, len(dataset) - 1, n, dtype=int)
+    print(f"  Dataset: {dataset_name}, {len(dataset)} samples, visualizing {n}")
+
+    # =========================================================================
+    # 4. Reconstruct & Visualize
+    # =========================================================================
+    print(f"\n[3/3] Generating reconstructions...\n")
+
+    rmse_all_list, body_list, hand_list = [], [], []
+    m_np = mean.numpy()
+    s_np = std.numpy()
+
+    # feats→joints (원본 로직 그대로, import 경로만 변경 + CPU 강제로 device mismatch 방지)
+    if D >= 528:
+        def to_joints(feats_norm, m_np, s_np):
+            return feats528_to_joints55(feats_norm, m_np, s_np)
     else:
-        device = torch.device('cuda:0')
-    
-    print(f"  Device: {device}")
-    
-    # Load weights
-    def load_checkpoint(path):
-        state_dict = torch.load(path, map_location=device, weights_only=False)
-        if 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-        return state_dict
-    
-    if custom_args.checkpoint:
-        print(f"  Loading checkpoint: {custom_args.checkpoint}")
-        state_dict = load_checkpoint(custom_args.checkpoint)
-        model.load_state_dict(state_dict, strict=False)
-    elif hasattr(cfg.TRAIN, 'PRETRAINED_VAE') and cfg.TRAIN.PRETRAINED_VAE:
-        print(f"  Loading VAE: {cfg.TRAIN.PRETRAINED_VAE}")
-        load_pretrained_vae(cfg, model, logger=None)
-    elif hasattr(cfg.TEST, 'CHECKPOINTS') and cfg.TEST.CHECKPOINTS:
-        print(f"  Loading checkpoint: {cfg.TEST.CHECKPOINTS}")
-        state_dict = load_checkpoint(cfg.TEST.CHECKPOINTS)
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        print("  Warning: No checkpoint loaded, using random weights")
-    
-    model.eval()
-    model.to(device)
-    
-    # =========================
-    # Print Model Info
-    # =========================
-    print(f"\n[Model Info]")
-    print(f"  VAE type: MldVae (Continuous)")
-    if hasattr(model.vae, 'latent_dim'):
-        print(f"  Latent dim: {model.vae.latent_dim}")
-    if hasattr(model.vae, 'nfeats'):
-        print(f"  Input features: {model.vae.nfeats}")
-    
-    # Get feats2joints converter
-    feats2joints = None
-    if hasattr(datamodule, 'feats2joints'):
-        feats2joints = datamodule.feats2joints
-        print(f"  feats2joints: Available")
-    else:
-        print(f"  feats2joints: Not available (will use feature visualization)")
-    
-    # =========================
-    # Process Each Split
-    # =========================
-    print(f"\n[3/3] Processing samples...")
-    
-    all_metrics = []
-    global_sample_idx = 0
-    
-    for split in splits_to_process:
-        print(f"\n{'='*70}")
-        print(f"Processing {split.upper()} split")
-        print(f"{'='*70}")
-        
-        # Get dataloader
-        try:
-            if split == 'train':
-                datamodule.setup(stage='fit')
-                dataloader = datamodule.train_dataloader()
-            elif split == 'val':
-                datamodule.setup(stage='fit')
-                dataloader = datamodule.val_dataloader()
-            else:
-                datamodule.setup(stage='test')
-                dataloader = datamodule.test_dataloader()
-        except Exception as e:
-            print(f"  Warning: Could not load {split} dataloader: {e}")
+        # [변경] motGPT import + 모든 텐서를 CPU로 (SMPL-X 모델이 CPU에 있으므로)
+        from motGPT.data.H2S import feats2joints_smplx
+
+        def to_joints(feats_norm, m_np, s_np):
+            smplx_dev = torch.device('cuda:0')
+            t = torch.from_numpy(feats_norm).float().unsqueeze(0).to(smplx_dev)
+            m_t = torch.from_numpy(m_np).float().to(smplx_dev)
+            s_t = torch.from_numpy(s_np).float().to(smplx_dev)
+            try:
+                _, joints = feats2joints_smplx(t, m_t, s_t)
+                return joints.squeeze(0).cpu().numpy()[:, :55, :]
+            except Exception as e:
+                print(f"    Warning: SMPL-X forward failed: {e}")
+                raw = feats_norm * (s_np + 1e-10) + m_np
+                return feats120_to_joints55(raw)
+
+    for idx_i, ds_idx in enumerate(indices):
+        item = dataset[ds_idx]
+        if item is None:
             continue
-        
-        # Create output subdirectory
-        split_output_dir = os.path.join(output_dir, split)
-        os.makedirs(split_output_dir, exist_ok=True)
-        
-        # Track collected samples
-        collected = {ds: 0 for ds in datasets_to_process}
-        target_per_dataset = custom_args.num_samples
-        
-        def all_collected():
-            return all(collected[ds] >= target_per_dataset for ds in datasets_to_process)
-        
-        for batch in tqdm(dataloader, desc=f"{split}"):
-            if all_collected():
-                break
-            
-            # Move to device
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                    for k, v in batch.items()}
-            
-            feats_ref = batch['motion']
-            lengths = batch['length']
-            names = batch.get('name', [f'sample_{i}' for i in range(len(lengths))])
-            srcs = batch.get('src', ['how2sign'] * len(lengths))
-            B = feats_ref.shape[0]
-            
-            with torch.no_grad():
-                for i in range(B):
-                    if all_collected():
-                        break
-                    
-                    length = lengths[i].item() if isinstance(lengths[i], torch.Tensor) else lengths[i]
-                    if length == 0:
-                        continue
-                    
-                    name = names[i] if names else f'sample_{global_sample_idx}'
-                    src = srcs[i] if srcs else 'unknown'
-                    
-                    src_key = normalize_source_name(src)
-                    
-                    if src_key not in datasets_to_process:
-                        continue
-                    if collected[src_key] >= target_per_dataset:
-                        continue
-                    
-                    # Forward through MldVae
-                    feats_pred, vae_info = mldvae_forward(model, feats_ref[i:i+1], length)
-                    
-                    # Convert to joints
-                    has_joints = False
-                    gt_joints_np = None
-                    recon_joints_np = None
-                    
-                    if feats2joints is not None:
-                        try:
-                            gt_input = feats_ref[i:i+1, :length].to(device)
-                            recon_input = feats_pred.to(device)
-                            
-                            # Handle both single and tuple return values
-                            gt_result = feats2joints(gt_input)
-                            recon_result = feats2joints(recon_input)
-                            
-                            # feats2joints may return (vertices, joints) or just joints
-                            if isinstance(gt_result, tuple):
-                                gt_joints = gt_result[-1]  # joints is usually last
-                                recon_joints = recon_result[-1]
-                            else:
-                                gt_joints = gt_result
-                                recon_joints = recon_result
-                            
-                            gt_joints = gt_joints * POSE_SCALE
-                            recon_joints = recon_joints * POSE_SCALE
-                            gt_joints_np = gt_joints.cpu().numpy()
-                            recon_joints_np = recon_joints.cpu().numpy()
-                            
-                            if gt_joints_np.ndim == 4:
-                                gt_joints_np = gt_joints_np[0]
-                                recon_joints_np = recon_joints_np[0]
-                            
-                            has_joints = True
-                        except Exception as e:
-                            if global_sample_idx == 0:
-                                print(f"    Note: feats2joints failed ({e})")
-                            has_joints = False
-                    
-                    # Get feature arrays
-                    gt_feats_np = feats_ref[i, :length].cpu().numpy()
-                    recon_feats_np = feats_pred[0].cpu().numpy()
-                    
-                    # Compute metrics
-                    metrics = compute_metrics(gt_feats_np, recon_feats_np, gt_joints_np, recon_joints_np)
-                    metrics['name'] = name
-                    metrics['src'] = src_key
-                    metrics['split'] = split
-                    metrics['length'] = int(length)
-                    metrics['vae_info'] = vae_info
-                    all_metrics.append(metrics)
-                    
-                    # Print sample info
-                    print(f"\n[{split}/{src_key}] {name}")
-                    print(f"  Length: {length} frames")
-                    print(f"  Feature RMSE: {metrics['feat_rmse']:.6f}")
-                    
-                    if has_joints and 'mpjpe' in metrics:
-                        print(f"  MPJPE: {metrics['mpjpe']:.4f}")
-                        if 'mpjpe_body' in metrics:
-                            print(f"  MPJPE - Body: {metrics['mpjpe_body']:.4f}, "
-                                  f"LHand: {metrics['mpjpe_lhand']:.4f}, "
-                                  f"RHand: {metrics['mpjpe_rhand']:.4f}")
-                    
-                    # Print VAE info
-                    latent_info = vae_info['latent']
-                    print(f"  Latent - mu: {latent_info['mu_mean']:.4f}±{latent_info['mu_std']:.4f}, "
-                          f"var: {latent_info['var_mean']:.4f}")
-                    
-                    # Save video
-                    if has_joints and not custom_args.no_video:
-                        ds_output_dir = os.path.join(split_output_dir, src_key)
-                        os.makedirs(ds_output_dir, exist_ok=True)
-                        
-                        safe_name = name.replace('/', '_').replace('\\', '_')
-                        
-                        if custom_args.three_view:
-                            video_path = os.path.join(ds_output_dir, 
-                                                      f'{collected[src_key]:03d}_{safe_name}_3view.mp4')
-                            save_three_view_video(gt_joints_np, recon_joints_np, video_path,
-                                                 f'{split}/{src_key}: {name}', custom_args.fps)
-                        else:
-                            video_path = os.path.join(ds_output_dir, 
-                                                      f'{collected[src_key]:03d}_{safe_name}.mp4')
-                            save_comparison_video(gt_joints_np, recon_joints_np, video_path,
-                                                 f'{split}/{src_key}: {name}', custom_args.fps)
-                        print(f"  Saved: {video_path}")
-                    
-                    collected[src_key] += 1
-                    global_sample_idx += 1
-        
-        # Print collection summary
-        print(f"\n[{split}] Collection summary:")
-        for ds, count in collected.items():
-            print(f"  {ds}: {count}/{target_per_dataset}")
-    
-    # =========================
-    # Print Summary
-    # =========================
-    print(f"\n{'='*70}")
-    print("Summary")
-    print(f"{'='*70}")
-    print(f"Total samples: {len(all_metrics)}")
-    
-    if all_metrics:
-        print(f"\n[Overall]")
-        print(f"  Avg Feature RMSE: {np.mean([m['feat_rmse'] for m in all_metrics]):.6f}")
-        if 'mpjpe' in all_metrics[0]:
-            print(f"  Avg MPJPE: {np.mean([m['mpjpe'] for m in all_metrics]):.4f}")
-        
-        # Per-split metrics
-        for split in splits_to_process:
-            split_metrics = [m for m in all_metrics if m.get('split') == split]
-            if not split_metrics:
-                continue
-            
-            print(f"\n[{split.upper()}] ({len(split_metrics)} samples)")
-            print(f"  Avg Feature RMSE: {np.mean([m['feat_rmse'] for m in split_metrics]):.6f}")
-            if 'mpjpe' in split_metrics[0]:
-                print(f"  Avg MPJPE: {np.mean([m['mpjpe'] for m in split_metrics]):.4f}")
-            
-            for ds in datasets_to_process:
-                ds_metrics = [m for m in split_metrics if m.get('src') == ds]
-                if not ds_metrics:
-                    continue
-                
-                print(f"\n    [{ds}] ({len(ds_metrics)} samples)")
-                print(f"      Feature RMSE: {np.mean([m['feat_rmse'] for m in ds_metrics]):.6f}")
-                if 'mpjpe' in ds_metrics[0]:
-                    print(f"      MPJPE: {np.mean([m['mpjpe'] for m in ds_metrics]):.4f}")
-        
-        # VAE latent stats
-        print(f"\n[VAE Latent Statistics]")
-        mu_means = [m['vae_info']['latent']['mu_mean'] for m in all_metrics]
-        var_means = [m['vae_info']['latent']['var_mean'] for m in all_metrics]
-        print(f"  Avg mu: {np.mean(mu_means):.4f} ± {np.std(mu_means):.4f}")
-        print(f"  Avg var: {np.mean(var_means):.4f} ± {np.std(var_means):.4f}")
-    
-    # =========================
-    # Save Metrics to JSON
-    # =========================
-    metrics_path = os.path.join(output_dir, 'metrics.json')
-    with open(metrics_path, 'w') as f:
-        json.dump(all_metrics, f, indent=2)
-    print(f"\nMetrics saved to: {metrics_path}")
-    
-    # Save config summary
-    config_summary = {
-        'config_name': cfg.NAME if hasattr(cfg, 'NAME') else 'Unknown',
-        'timestamp': timestamp,
-        'num_samples_per_dataset_per_split': custom_args.num_samples,
-        'splits': splits_to_process,
-        'datasets': datasets_to_process,
-        'vae_type': 'MldVae (Continuous)',
-        'total_samples': len(all_metrics),
-    }
-    config_path = os.path.join(output_dir, 'config_summary.json')
-    with open(config_path, 'w') as f:
-        json.dump(config_summary, f, indent=2)
-    
-    print(f"Config summary saved to: {config_path}")
-    print(f"\nOutput directory: {output_dir}")
+
+        # [변경] SignGPT3 dataset returns tuple, not dict
+        text = item[0]
+        gt_norm = item[1]               # [T, D] tensor
+        T_len = int(item[2])
+        name = item[3]
+        src = item[9] if len(item) > 9 else 'unknown'
+
+        # [변경] VAE forward: encode + decode
+        with torch.no_grad():
+            motion_in = gt_norm.unsqueeze(0).float().to(device)  # [1, T, D]
+            z, dist = model.vae.encode(motion_in, [T_len])
+            feats_rst = model.vae.decode(z, [T_len])
+            recon_norm = feats_rst[0].cpu().numpy()              # [T, D]
+
+        gt_np = gt_norm.numpy()
+
+        # ---- Metrics (원본 그대로) ----
+        T = min(T_len, recon_norm.shape[0], gt_np.shape[0])
+        gt_crop = gt_np[:T]
+        recon_crop = recon_norm[:T]
+        diff = gt_crop - recon_crop
+
+        rmse = np.sqrt(np.mean(diff ** 2))
+
+        if D >= 528:
+            body_rmse = np.sqrt(np.mean(diff[:, :42] ** 2))
+            hand_rmse = np.sqrt(np.mean(diff[:, 42:132] ** 2))
+        else:
+            body_rmse = np.sqrt(np.mean(diff[:, :30] ** 2))
+            hand_rmse = np.sqrt(np.mean(diff[:, 30:120] ** 2))
+
+        rmse_all_list.append(rmse)
+        body_list.append(body_rmse)
+        hand_list.append(hand_rmse)
+
+        # ---- Joints (원본 그대로) ----
+        gt_joints = to_joints(gt_crop, m_np, s_np)
+        recon_joints = to_joints(recon_crop, m_np, s_np)
+
+        z_np = z.cpu().numpy()
+
+        safe_name = str(name)[:30].replace('/', '_').replace(' ', '_')
+        print(f"  [{idx_i + 1}/{n}] {name} (T={T_len}, src={src})")
+        print(f"    RMSE: total={rmse:.4f}  body={body_rmse:.4f}  hand={hand_rmse:.4f}")
+        print(f"    z: mean={z_np.mean():.3f}, std={z_np.std():.3f}")
+        if text:
+            print(f"    text: \"{text[:60]}\"")
+
+        path = os.path.join(output_root, f'{idx_i:03d}_{safe_name}.mp4')
+        title = (f'{name} [{src}] T={T_len}\n'
+                 f'RMSE={rmse:.4f} (body={body_rmse:.4f}, hand={hand_rmse:.4f})')
+        save_comparison_video(
+            gt_joints, recon_joints, path, title,
+            args.fps, args.viewport,
+            flip_y=(D >= 528),  # 528D=Z-up→flip, 120D=SMPLX Y-up→no flip
+        )
+        print(f"    → {path}")
+
+    # =========================================================================
+    # Summary (원본 그대로)
+    # =========================================================================
+    print(f"\n{'=' * 60}")
+    print(f"Summary ({n} samples)")
+    print(f"  RMSE:      {np.mean(rmse_all_list):.4f} ± {np.std(rmse_all_list):.4f}")
+    print(f"  Body RMSE: {np.mean(body_list):.4f} ± {np.std(body_list):.4f}")
+    print(f"  Hand RMSE: {np.mean(hand_list):.4f} ± {np.std(hand_list):.4f}")
+    print(f"\nVideos: {output_root}")
+    print("=" * 60)
+
+    with open(os.path.join(output_root, 'summary.txt'), 'w') as f:
+        f.write(f"VAE Reconstruction Summary\n")
+        f.write(f"Checkpoint: {args.ckpt}\n")
+        f.write(f"Config: {args.cfg}\n")
+        f.write(f"Dataset: {dataset_name} / {args.split}\n")
+        f.write(f"Samples: {n}\n\n")
+        f.write(f"RMSE:      {np.mean(rmse_all_list):.4f} ± {np.std(rmse_all_list):.4f}\n")
+        f.write(f"Body RMSE: {np.mean(body_list):.4f} ± {np.std(body_list):.4f}\n")
+        f.write(f"Hand RMSE: {np.mean(hand_list):.4f} ± {np.std(hand_list):.4f}\n\n")
+        for i, (r, b, h) in enumerate(zip(rmse_all_list, body_list, hand_list)):
+            f.write(f"  [{i}] total={r:.4f}  body={b:.4f}  hand={h:.4f}\n")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,6 +1,6 @@
 **/__pycache__/**
 *.pyc
-
+vis*/
 code_for_demo/
 demos/
 experiments/
