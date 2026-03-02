@@ -1,6 +1,7 @@
 **/__pycache__/**
 *.pyc
 vis*/
+deps
 code_for_demo/
 demos/
 experiments/

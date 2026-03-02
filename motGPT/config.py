@@ -44,20 +44,30 @@ def instantiate_from_config(config):
 
 def resume_config(cfg: OmegaConf):
     """
-    Resume model and wandb
+    Resume model and wandb.
+    RESUME 값으로 두 가지 형태 지원:
+      1. .ckpt 파일 직접 경로: experiments/.../checkpoints/last.ckpt
+      2. 실험 폴더 경로:       experiments/.../SignGPT3_vae_mld  (기존 방식)
     """
-    
     if cfg.TRAIN.RESUME:
         resume = cfg.TRAIN.RESUME
-        if os.path.exists(resume):
-            # Checkpoints
-            cfg.TRAIN.PRETRAINED = pjoin(resume, "checkpoints", "last.ckpt")
-            # Wandb
-            wandb_files = os.listdir(pjoin(resume, "wandb", "latest-run"))
-            wandb_run = [item for item in wandb_files if "run-" in item][0]
-            cfg.LOGGER.WANDB.params.id = wandb_run.replace("run-","").replace(".wandb", "")
-        else:
-            raise ValueError("Resume path is not right.")
+        if not os.path.exists(resume):
+            raise ValueError(f"Resume path does not exist: {resume}")
+
+        # ── Case 1: .ckpt 파일 직접 지정 ──────────────────────────────
+        if resume.endswith('.ckpt'):
+            cfg.TRAIN.PRETRAINED = resume
+            # wandb resume은 skip (offline 또는 미사용)
+            return cfg
+
+        # ── Case 2: 실험 폴더 지정 (기존 방식) ────────────────────────
+        cfg.TRAIN.PRETRAINED = pjoin(resume, "checkpoints", "last.ckpt")
+        wandb_dir = pjoin(resume, "wandb", "latest-run")
+        if os.path.exists(wandb_dir):
+            wandb_files = os.listdir(wandb_dir)
+            wandb_run = [item for item in wandb_files if "run-" in item]
+            if wandb_run:
+                cfg.LOGGER.WANDB.params.id = wandb_run[0].replace("run-","").replace(".wandb", "")
 
     return cfg
 

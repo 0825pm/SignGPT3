@@ -51,6 +51,7 @@ def main():
         default_root_dir=cfg.FOLDER_EXP,
         max_epochs=cfg.TRAIN.END_EPOCH,
         # precision='16',
+        precision="bf16-mixed",
         logger=pl_loggers,
         callbacks=callbacks,
         check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
